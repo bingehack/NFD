@@ -377,9 +377,22 @@ async function onMessage (message) {
               text: '请提供有效的用户ID（纯数字）'
             });
           }
+          // 支持直接通过ID解除屏蔽
+          if(message.text.startsWith('/unblock ') && !message.reply_to_message) {
+            const userId = message.text.substring(9).trim();
+            if(/^\d+$/.test(userId)) {
+              // 创建模拟消息对象以调用handleUnBlockById函数
+              const mockMessage = { ...message, text: '/unblock', targetUserId: userId };
+              return handleUnBlockById(mockMessage);
+            }
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: '请提供有效的用户ID（纯数字）'
+            });
+          }
           return sendMessage({
             chat_id:ADMIN_UID,
-            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户（回复消息）\n- /block 用户ID - 直接通过ID屏蔽用户\n- /unblock - 解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
+            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户（回复消息）\n- /block 用户ID - 直接通过ID屏蔽用户\n- /unblock - 解除屏蔽（回复消息）\n- /unblock 用户ID - 直接通过ID解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
           })
         }
     if(/^\/block$/.exec(message.text)){
@@ -596,6 +609,49 @@ async function handleNotify(message){
       })
     }
   }
+}
+
+// 处理直接通过用户ID解除屏蔽的函数
+async function handleUnBlockById(message){
+  const guestChantId = message.targetUserId;
+  
+  // 检查用户是否被屏蔽
+  const isBlocked = await nfd.get('isblocked-' + guestChantId, { type: "json" });
+  
+  if(!isBlocked){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text:`用户 ${guestChantId} 并未被屏蔽`
+    })
+  }
+  
+  // 解除屏蔽状态
+  await nfd.put('isblocked-' + guestChantId, false);
+  
+  // 获取用户详细信息用于显示
+  let userName = `用户ID: ${guestChantId}`;
+  try {
+    const blockInfoStr = await nfd.get(BLOCKED_USER_INFO_PREFIX + guestChantId);
+    if (blockInfoStr) {
+      const blockInfo = JSON.parse(blockInfoStr);
+      userName = blockInfo.userName || userName;
+    }
+  } catch (error) {
+    console.error('获取屏蔽用户信息失败:', error);
+  }
+  
+  // 更新屏蔽用户索引（保留信息但标记为已解除屏蔽）
+  const blockedUsersIndex = await getBlockedUsersIndex();
+  const userIndex = blockedUsersIndex.findIndex(item => item.userId === guestChantId);
+  if (userIndex !== -1) {
+    blockedUsersIndex[userIndex].unblockedAt = Date.now();
+    await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+  }
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `UID:${guestChantId} (${userName}) 解除屏蔽成功`,
+  })
 }
 
 // 处理直接通过用户ID屏蔽用户的函数

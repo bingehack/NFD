@@ -436,9 +436,35 @@ async function onMessage (message) {
               text: `用户 ${userId} 已从白名单中移除`
             });
           }
+          // 支持直接通过ID屏蔽用户
+          if(message.text.startsWith('/block ') && !message.reply_to_message) {
+            const userId = message.text.substring(7).trim();
+            if(/^\d+$/.test(userId)) {
+              // 创建模拟消息对象以调用handleBlockById函数
+              const mockMessage = { ...message, text: '/block', targetUserId: userId };
+              return handleBlockById(mockMessage);
+            }
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: '请提供有效的用户ID（纯数字）'
+            });
+          }
+          // 支持直接通过ID解除屏蔽
+          if(message.text.startsWith('/unblock ') && !message.reply_to_message) {
+            const userId = message.text.substring(9).trim();
+            if(/^\d+$/.test(userId)) {
+              // 创建模拟消息对象以调用handleUnBlockById函数
+              const mockMessage = { ...message, text: '/unblock', targetUserId: userId };
+              return handleUnBlockById(mockMessage);
+            }
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: '请提供有效的用户ID（纯数字）'
+            });
+          }
           return sendMessage({
             chat_id:ADMIN_UID,
-            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户\n- /unblock - 解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
+            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户（回复消息）\n- /block 用户ID - 直接通过ID屏蔽用户\n- /unblock - 解除屏蔽（回复消息）\n- /unblock 用户ID - 直接通过ID解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
           })
         }
     if(/^\/block$/.exec(message.text)){
@@ -463,7 +489,7 @@ async function onMessage (message) {
 
 async function handleGuestMessage(message){  
   let chatId = message.chat.id;
-  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })  
   
   if(isblocked){    
     return sendMessage({      
@@ -482,12 +508,35 @@ async function handleGuestMessage(message){
     await nfd.put('isblocked-' + chatId, true);
     
     // 获取被屏蔽用户的名称
-    const userName = message.from ? `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() : '未知用户';
+    let userName = '未知用户';
+    let userType = 'user';
+    
+    // 处理转发消息
+    if (message.forward_from_chat) {
+      // 转发自频道
+      userType = 'channel';
+      userName = message.forward_from_chat.title || '未知频道';
+    } else if (message.forward_from) {
+      // 转发自用户
+      const forwardUser = message.forward_from;
+      userName = `${forwardUser.first_name || ''} ${forwardUser.last_name || ''}`.trim() || '未知用户';
+    } else {
+      // 从消息文本中解析通过机器人转发的情况
+      const messageText = message.text || '';
+      const forwardedMatch = messageText.match(/^转发自([^通过]+)通过@/);
+      if (forwardedMatch && forwardedMatch[1]) {
+        userName = forwardedMatch[1].trim();
+      } else {
+        // 普通情况
+        userName = message.from ? `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() : '未知用户';
+      }
+    }
     
     // 创建屏蔽用户信息对象
     const blockInfo = {
       userId: chatId,
       userName: userName,
+      userType: userType,
       blockedAt: Date.now(),
       blockingReason: '自动屏蔽（包含关键词）',
       matchedKeywords: keywordCheck.matchedKeywords,
@@ -636,6 +685,91 @@ async function handleUnBlock(message){
     chat_id: ADMIN_UID,
     text:`UID:${guestChantId} (${userName}) 解除屏蔽成功`,
   })
+}
+
+/**
+ * 通过用户ID直接屏蔽用户
+ * @param {Object} message 消息对象，包含targetUserId字段
+ */
+async function handleBlockById(message) {
+  const guestChantId = message.targetUserId;
+  
+  if(guestChantId === ADMIN_UID) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '不能屏蔽自己'
+    });
+  }
+  
+  // 设置屏蔽状态
+  await nfd.put('isblocked-' + guestChantId, true);
+  
+  // 创建屏蔽用户信息对象
+  const blockInfo = {
+    userId: guestChantId,
+    userName: `用户ID: ${guestChantId}`,
+    userType: 'user',
+    blockedAt: Date.now(),
+    blockingReason: '管理员手动通过ID屏蔽',
+    matchedKeywords: []
+  };
+  
+  // 存储用户详细信息
+  await nfd.put(BLOCKED_USER_INFO_PREFIX + guestChantId, JSON.stringify(blockInfo));
+  
+  // 更新屏蔽用户索引
+  const blockedUsersIndex = await getBlockedUsersIndex();
+  const existingIndex = blockedUsersIndex.findIndex(item => item.userId === guestChantId);
+  if (existingIndex === -1) {
+    blockedUsersIndex.push({
+      userId: guestChantId,
+      blockedAt: Date.now()
+    });
+    await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+  }
+  
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `用户 ${guestChantId} 已成功屏蔽`
+  });
+}
+
+/**
+ * 通过用户ID直接解除屏蔽
+ * @param {Object} message 消息对象，包含targetUserId字段
+ */
+async function handleUnBlockById(message) {
+  const guestChantId = message.targetUserId;
+  
+  if(guestChantId === ADMIN_UID) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '不能对自己执行此操作'
+    });
+  }
+  
+  // 检查用户是否被屏蔽
+  const isBlocked = await nfd.get('isblocked-' + guestChantId, { type: "json" });
+  
+  if(!isBlocked) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: `用户 ${guestChantId} 未被屏蔽`
+    });
+  }
+  
+  // 移除屏蔽状态
+  await nfd.put('isblocked-' + guestChantId, false);
+  
+  // 更新屏蔽用户索引
+  const blockedUsersIndex = await getBlockedUsersIndex();
+  const updatedIndex = blockedUsersIndex.filter(item => item.userId !== guestChantId);
+  await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(updatedIndex));
+  
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `用户 ${guestChantId} 已成功解除屏蔽`
+  });
 }
 
 async function checkBlock(message){
