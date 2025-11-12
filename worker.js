@@ -14,6 +14,7 @@ const KEYWORD_FILTERS_KEY = 'keyword_filters';
 const DEFAULT_KEYWORDS = ['领钱', '充值', '担保', '回馈客户', '彩金','协议','手续费','合作共赢'];
 const ADMIN_NOTIFICATIONS_KEY = 'admin_notifications';
 const NOTIFICATION_EXPIRY_HOURS = 24; // 消息过期时间：24小时
+const WHITELIST_KEY = 'user_whitelist'; // 白名单存储键名
 
 /**
  * Return url to telegram api, optionally with parameters added
@@ -196,14 +197,121 @@ async function addKeywordFilter(keyword) {
  * 删除屏蔽关键字
  */
 async function removeKeywordFilter(keyword) {
-  const keywords = await getKeywordFilters();
-  const index = keywords.indexOf(keyword);
-  if (index > -1) {
-    keywords.splice(index, 1);
+  try {
+    let keywords = await getKeywordFilters();
+    keywords = keywords.filter(k => k.toLowerCase() !== keyword.toLowerCase());
     await nfd.put(KEYWORD_FILTERS_KEY, JSON.stringify(keywords));
-    return true;
+    return keywords;
+  } catch (error) {
+    console.error('删除关键字失败:', error);
+    return await getKeywordFilters(); // 返回未修改的列表
   }
-  return false;
+}
+
+/**
+ * 获取白名单用户列表
+ */
+async function getWhitelist() {
+  try {
+    const whitelist = await nfd.get(WHITELIST_KEY, { type: 'json' });
+    // 如果白名单不存在或不是数组，初始化一个空数组
+    if (!whitelist || !Array.isArray(whitelist)) {
+      await nfd.put(WHITELIST_KEY, JSON.stringify([]));
+      return [];
+    }
+    return whitelist;
+  } catch (error) {
+    console.error('获取白名单失败:', error);
+    return [];
+  }
+}
+
+/**
+ * 检查用户是否在白名单中
+ * @param {number|string} userId 用户ID
+ * @returns {boolean} 是否在白名单中
+ */
+async function isInWhitelist(userId) {
+  try {
+    const whitelist = await getWhitelist();
+    const stringUserId = String(userId);
+    return whitelist.includes(stringUserId);
+  } catch (error) {
+    console.error('检查白名单失败:', error);
+    return false;
+  }
+}
+
+/**
+ * 添加用户到白名单
+ * @param {number|string} userId 用户ID
+ * @returns {Array} 更新后的白名单
+ */
+async function addToWhitelist(userId) {
+  try {
+    const whitelist = await getWhitelist();
+    const stringUserId = String(userId);
+    
+    // 如果用户不在白名单中，则添加
+    if (!whitelist.includes(stringUserId)) {
+      whitelist.push(stringUserId);
+      await nfd.put(WHITELIST_KEY, JSON.stringify(whitelist));
+    }
+    
+    return whitelist;
+  } catch (error) {
+    console.error('添加白名单失败:', error);
+    return await getWhitelist();
+  }
+}
+
+/**
+ * 从白名单中移除用户
+ * @param {number|string} userId 用户ID
+ * @returns {Array} 更新后的白名单
+ */
+async function removeFromWhitelist(userId) {
+  try {
+    let whitelist = await getWhitelist();
+    const stringUserId = String(userId);
+    
+    // 过滤掉要删除的用户
+    whitelist = whitelist.filter(id => id !== stringUserId);
+    await nfd.put(WHITELIST_KEY, JSON.stringify(whitelist));
+    
+    return whitelist;
+  } catch (error) {
+    console.error('移除白名单失败:', error);
+    return await getWhitelist();
+  }
+}
+
+/**
+ * 显示白名单内容
+ * @param {Object} message Telegram消息对象
+ */
+async function showWhitelist(message) {
+  try {
+    const whitelist = await getWhitelist();
+    let text;
+    
+    if (whitelist.length === 0) {
+      text = '当前白名单为空';
+    } else {
+      text = `当前白名单用户ID列表:\n${whitelist.join('\n')}`;
+    }
+    
+    return sendMessage({
+      chat_id: message.chat.id,
+      text: text
+    });
+  } catch (error) {
+    console.error('显示白名单失败:', error);
+    return sendMessage({
+      chat_id: message.chat.id,
+      text: '显示白名单失败，请稍后再试'
+    });
+  }
 }
 
 /**
@@ -283,9 +391,29 @@ async function onMessage (message) {
           if(message.text === '/listblocked') {
             return listBlockedUsers(message);
           }
+          // 白名单管理命令
+          if(message.text === '/whitelist') {
+            return showWhitelist(message);
+          }
+          if(message.text.startsWith('/addwhitelist ')) {
+            const userId = message.text.substring(13).trim();
+            await addToWhitelist(userId);
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: `用户 ${userId} 已添加到白名单`
+            });
+          }
+          if(message.text.startsWith('/removewhitelist ')) {
+            const userId = message.text.substring(17).trim();
+            await removeFromWhitelist(userId);
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: `用户 ${userId} 已从白名单中移除`
+            });
+          }
           return sendMessage({
             chat_id:ADMIN_UID,
-            text:'使用方法，回复转发的消息，并发送回复消息，或者`/block`、`/unblock`、`/checkblock`等指令\n\n关键词管理命令：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n- /listblocked - 查看所有被屏蔽的用户'
+            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户\n- /unblock - 解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
           })
         }
     if(/^\/block$/.exec(message.text)){
@@ -308,20 +436,23 @@ async function onMessage (message) {
   return handleGuestMessage(message)
 }
 
-async function handleGuestMessage(message){
+async function handleGuestMessage(message){  
   let chatId = message.chat.id;
   let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
   
-  if(isblocked){
-    return sendMessage({
-      chat_id: chatId,
-      text:'Your are blocked'
+  if(isblocked){    
+    return sendMessage({      
+      chat_id: chatId,      
+      text:'Your are blocked'    
     })
-  }
+  }  
   
-  // 检查消息是否包含屏蔽关键字
-  const keywordCheck = await containsBlockedKeyword(message);
-  if (keywordCheck.isBlocked) {
+  // 检查用户是否在白名单中
+  const isWhitelisted = await isInWhitelist(chatId);
+  
+  // 检查消息是否包含屏蔽关键字（白名单用户不受限制）
+  const keywordCheck = !isWhitelisted && await containsBlockedKeyword(message);
+  if (keywordCheck && keywordCheck.isBlocked) {
     // 自动屏蔽用户
     await nfd.put('isblocked-' + chatId, true);
     
