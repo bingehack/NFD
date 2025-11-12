@@ -16,6 +16,12 @@ const DEFAULT_KEYWORDS = ['领钱', '充值', '担保', '回馈客户', '彩金'
 const ADMIN_NOTIFICATIONS_KEY = 'admin_notifications';
 const NOTIFICATION_EXPIRY_HOURS = 0.01; // 消息过期时间：0.01小时（约36秒）
 const WHITELIST_KEY = 'user_whitelist'; // 白名单存储键名
+// 存储被屏蔽用户详细信息的键名前缀
+const BLOCKED_USER_INFO_PREFIX = 'blocked-user-info-';
+// 存储被屏蔽用户索引的键名
+const BLOCKED_USERS_INDEX_KEY = 'blocked-users-index';
+// 分页大小
+const PAGE_SIZE = 10;
 
 /**
  * Return url to telegram api, optionally with parameters added
@@ -215,6 +221,25 @@ async function removeFromWhitelist(userId) {
 }
 
 /**
+ * 获取被屏蔽用户索引列表
+ * @returns {Array} 屏蔽用户索引数组
+ */
+async function getBlockedUsersIndex() {
+  try {
+    const index = await nfd.get(BLOCKED_USERS_INDEX_KEY, { type: 'json' });
+    // 如果索引不存在或不是数组，初始化一个空数组
+    if (!index || !Array.isArray(index)) {
+      await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify([]));
+      return [];
+    }
+    return index;
+  } catch (error) {
+    console.error('获取屏蔽用户索引失败:', error);
+    return [];
+  }
+}
+
+/**
  * 显示白名单内容
  * @param {Object} message Telegram消息对象
  */
@@ -339,9 +364,22 @@ async function onMessage (message) {
               text: `用户 ${userId} 已从白名单中移除`
             });
           }
+          // 支持直接通过ID屏蔽用户
+          if(message.text.startsWith('/block ') && !message.reply_to_message) {
+            const userId = message.text.substring(7).trim();
+            if(/^\d+$/.test(userId)) {
+              // 创建模拟消息对象以调用handleBlockById函数
+              const mockMessage = { ...message, text: '/block', targetUserId: userId };
+              return handleBlockById(mockMessage);
+            }
+            return sendMessage({
+              chat_id: message.chat.id,
+              text: '请提供有效的用户ID（纯数字）'
+            });
+          }
           return sendMessage({
             chat_id:ADMIN_UID,
-            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户\n- /unblock - 解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
+            text:'使用方法，回复转发的消息，并发送回复消息，或者使用以下命令：\n\n基础命令：\n- /block - 屏蔽用户（回复消息）\n- /block 用户ID - 直接通过ID屏蔽用户\n- /unblock - 解除屏蔽\n- /checkblock - 检查用户是否被屏蔽\n- /listblocked - 查看所有被屏蔽的用户\n\n关键词管理：\n- /keywords - 查看所有屏蔽关键字\n- /addkeyword 关键字1,关键字2 - 添加屏蔽关键字（支持英文逗号分隔多个）\n- /removekeyword 关键字 - 删除屏蔽关键字\n\n白名单管理：\n- /whitelist - 查看白名单用户列表\n- /addwhitelist 用户ID - 添加用户到白名单\n- /removewhitelist 用户ID - 从白名单中移除用户'
           })
         }
     if(/^\/block$/.exec(message.text)){
@@ -383,6 +421,56 @@ async function handleGuestMessage(message){
   if (keywordCheck && keywordCheck.isBlocked) {
     // 自动屏蔽用户
     await nfd.put('isblocked-' + chatId, true);
+    
+    // 获取被屏蔽用户的名称
+    let userName = '未知用户';
+    let userType = 'user';
+    
+    // 处理转发消息
+    if (message.forward_from_chat) {
+      // 转发自频道
+      userType = 'channel';
+      userName = message.forward_from_chat.title || '未知频道';
+    } else if (message.forward_from) {
+      // 转发自用户
+      const forwardUser = message.forward_from;
+      userName = `${forwardUser.first_name || ''} ${forwardUser.last_name || ''}`.trim() || '未知用户';
+    } else {
+      // 从消息文本中解析通过机器人转发的情况
+      const messageText = message.text || '';
+      const forwardedMatch = messageText.match(/^转发自([^通过]+)通过@/);
+      if (forwardedMatch && forwardedMatch[1]) {
+        userName = forwardedMatch[1].trim();
+      } else {
+        // 普通情况
+        userName = message.from ? `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() : '未知用户';
+      }
+    }
+    
+    // 创建屏蔽用户信息对象
+    const blockInfo = {
+      userId: chatId,
+      userName: userName,
+      userType: userType,
+      blockedAt: Date.now(),
+      blockingReason: '自动屏蔽（包含关键词）',
+      matchedKeywords: keywordCheck.matchedKeywords,
+      violatingLines: keywordCheck.violatingLines
+    };
+    
+    // 存储用户详细信息
+    await nfd.put(BLOCKED_USER_INFO_PREFIX + chatId, JSON.stringify(blockInfo));
+    
+    // 更新屏蔽用户索引
+    const blockedUsersIndex = await getBlockedUsersIndex();
+    const existingIndex = blockedUsersIndex.findIndex(item => item.userId === chatId);
+    if (existingIndex === -1) {
+      blockedUsersIndex.push({
+        userId: chatId,
+        blockedAt: Date.now()
+      });
+      await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+    }
     
     // 通知管理员，只包含违规行而不是完整内容
     const violatingLinesText = keywordCheck.violatingLines.map(line => `"${line}"`).join('\n');
@@ -510,6 +598,49 @@ async function handleNotify(message){
   }
 }
 
+// 处理直接通过用户ID屏蔽用户的函数
+async function handleBlockById(message){
+  const guestChantId = message.targetUserId;
+  
+  if(guestChantId === ADMIN_UID){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text:'不能屏蔽自己'
+    })
+  }
+  
+  // 设置屏蔽状态
+  await nfd.put('isblocked-' + guestChantId, true)
+  
+  // 创建屏蔽用户信息对象
+  const blockInfo = {
+    userId: guestChantId,
+    userName: `用户ID: ${guestChantId}`,
+    userType: 'user',
+    blockedAt: Date.now(),
+    blockingReason: '管理员手动通过ID屏蔽',
+    matchedKeywords: []
+  };
+  
+  // 存储用户详细信息
+  await nfd.put(BLOCKED_USER_INFO_PREFIX + guestChantId, JSON.stringify(blockInfo));
+  
+  // 更新屏蔽用户索引
+  const blockedUsersIndex = await getBlockedUsersIndex();
+  if (!blockedUsersIndex.some(item => item.userId === guestChantId)) {
+    blockedUsersIndex.push({
+      userId: guestChantId,
+      blockedAt: Date.now()
+    });
+    await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+  }
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `UID:${guestChantId} (用户ID: ${guestChantId}) 屏蔽成功`,
+  })
+}
+
 async function handleBlock(message){
   let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
                                       { type: "json" })
@@ -519,11 +650,64 @@ async function handleBlock(message){
       text:'不能屏蔽自己'
     })
   }
+  
+  // 设置屏蔽状态
   await nfd.put('isblocked-' + guestChantId, true)
+  
+  // 获取被屏蔽用户的名称和类型
+  let userName = '未知用户';
+  let userType = 'user'; // 'user' 或 'channel'
+  
+  const replyMessage = message.reply_to_message;
+  
+  // 处理转发消息
+  if (replyMessage.forward_from_chat) {
+    // 转发自频道
+    userType = 'channel';
+    userName = replyMessage.forward_from_chat.title || '未知频道';
+  } else if (replyMessage.forward_from) {
+    // 转发自用户
+    const forwardUser = replyMessage.forward_from;
+    userName = `${forwardUser.first_name || ''} ${forwardUser.last_name || ''}`.trim() || '未知用户';
+  } else {
+    // 从消息文本中解析通过机器人转发的情况
+    const messageText = replyMessage.text || '';
+    const forwardedMatch = messageText.match(/^转发自([^通过]+)通过@/);
+    if (forwardedMatch && forwardedMatch[1]) {
+      userName = forwardedMatch[1].trim();
+    } else {
+      // 普通情况，使用原有的用户信息获取逻辑
+       const guestUser = replyMessage.from;
+       userName = guestUser ? `${guestUser.first_name || ''} ${guestUser.last_name || ''}`.trim() : '未知用户';
+      }
+  }
+  
+  // 创建屏蔽用户信息对象
+  const blockInfo = {
+    userId: guestChantId,
+    userName: userName,
+    userType: userType,
+    blockedAt: Date.now(),
+    blockingReason: '管理员手动屏蔽',
+    matchedKeywords: []
+  };
+  
+  // 存储用户详细信息
+  await nfd.put(BLOCKED_USER_INFO_PREFIX + guestChantId, JSON.stringify(blockInfo));
+  
+  // 更新屏蔽用户索引
+  const blockedUsersIndex = await getBlockedUsersIndex();
+  if (!blockedUsersIndex.some(item => item.userId === guestChantId)) {
+    blockedUsersIndex.push({
+      userId: guestChantId,
+      blockedAt: Date.now()
+    });
+    await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+  }
 
   return sendMessage({
     chat_id: ADMIN_UID,
-    text: `UID:${guestChantId}屏蔽成功`,
+    text: `UID:${guestChantId} (${userName}) 屏蔽成功`,
   })
 }
 
@@ -531,11 +715,49 @@ async function handleUnBlock(message){
   let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
   { type: "json" })
 
+  // 解除屏蔽状态
   await nfd.put('isblocked-' + guestChantId, false)
+  
+  // 获取被解除屏蔽用户的名称
+  let userName = '未知用户';
+  const replyMessage = message.reply_to_message;
+  
+  // 处理转发消息
+  if (replyMessage.forward_from_chat) {
+    // 转发自频道
+    userName = replyMessage.forward_from_chat.title || '未知频道';
+  } else if (replyMessage.forward_from) {
+    // 转发自用户
+    const forwardUser = replyMessage.forward_from;
+    userName = `${forwardUser.first_name || ''} ${forwardUser.last_name || ''}`.trim() || '未知用户';
+  } else {
+    // 从消息文本中解析通过机器人转发的情况
+    const messageText = replyMessage.text || '';
+    const forwardedMatch = messageText.match(/^转发自([^通过]+)通过@/);
+    if (forwardedMatch && forwardedMatch[1]) {
+      userName = forwardedMatch[1].trim();
+    } else {
+      // 普通情况，使用原有的用户信息获取逻辑
+      const guestUser = replyMessage.from;
+      userName = guestUser ? `${guestUser.first_name || ''} ${guestUser.last_name || ''}`.trim() : '未知用户';
+    }
+  }
+  
+  // 删除用户详细信息
+  try {
+    await nfd.delete(BLOCKED_USER_INFO_PREFIX + guestChantId);
+    
+    // 更新屏蔽用户索引
+    const blockedUsersIndex = await getBlockedUsersIndex();
+    const filteredIndex = blockedUsersIndex.filter(item => item.userId !== guestChantId);
+    await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(filteredIndex));
+  } catch (error) {
+    console.error('删除屏蔽用户信息失败:', error);
+  }
 
   return sendMessage({
     chat_id: ADMIN_UID,
-    text:`UID:${guestChantId}解除屏蔽成功`,
+    text:`UID:${guestChantId} (${userName}) 解除屏蔽成功`,
   })
 }
 
@@ -682,38 +904,88 @@ async function isFraud(id){
  */
 async function listBlockedUsers(message) {
   try {
-    // 在Cloudflare Workers环境中，我们需要使用KV的list方法
-    // 这里我们查找所有以isblocked-开头的键
-    const blockedUsers = [];
+    // 获取页码参数，默认为第1页
+    let page = 1;
+    const messageText = message.text || '';
+    const pageMatch = messageText.match(/\s+(\d+)$/);
+    if (pageMatch && pageMatch[1]) {
+      page = parseInt(pageMatch[1], 10);
+      if (page < 1) page = 1;
+    }
     
-    // 由于KV API限制，我们需要获取所有可能的键并检查值
-    // 这里使用分页方式列出所有键
-    let cursor = undefined;
-    do {
-      const listResult = await nfd.list({
-        prefix: 'isblocked-',
-        cursor: cursor
-      });
-      
-      // 遍历所有找到的键，检查值是否为true（表示被屏蔽）
-      for (const key of listResult.keys) {
-        const value = await nfd.get(key.name, { type: "json" });
-        if (value === true) {
-          // 从键名中提取用户ID（去掉isblocked-前缀）
-          const userId = key.name.replace('isblocked-', '');
-          blockedUsers.push(userId);
-        }
+    // 获取所有被屏蔽用户的索引
+    let blockedUsersIndex = await getBlockedUsersIndex();
+    
+    // 过滤出仍然被屏蔽的用户
+    const activeBlockedUsers = [];
+    for (const indexItem of blockedUsersIndex) {
+      const isBlocked = await nfd.get('isblocked-' + indexItem.userId, { type: "json" });
+      if (isBlocked === true) {
+        activeBlockedUsers.push(indexItem);
+      }
+    }
+    
+    // 按屏蔽时间倒序排序（最新的排在前面）
+    activeBlockedUsers.sort((a, b) => b.blockedAt - a.blockedAt);
+    
+    // 计算分页信息
+    const totalCount = activeBlockedUsers.length;
+    const totalPages = Math.ceil(totalCount / PAGE_SIZE);
+    const startIndex = (page - 1) * PAGE_SIZE;
+    const endIndex = Math.min(startIndex + PAGE_SIZE, totalCount);
+    const paginatedUsers = activeBlockedUsers.slice(startIndex, endIndex);
+    
+    // 获取当前页用户的详细信息
+    const blockedUsersWithDetails = [];
+    for (const userIndex of paginatedUsers) {
+      let userInfo = null;
+      try {
+        userInfo = await nfd.get(BLOCKED_USER_INFO_PREFIX + userIndex.userId, { type: "json" });
+      } catch (error) {
+        console.error(`获取用户${userIndex.userId}详细信息失败:`, error);
       }
       
-      cursor = listResult.cursor;
-    } while (cursor);
+      blockedUsersWithDetails.push({
+        ...userIndex,
+        ...(userInfo || { userName: '未知用户', matchedKeywords: [] })
+      });
+    }
+    
+    // 构建回复消息
+    let responseText = '';
+    if (totalCount === 0) {
+      responseText = '当前没有被屏蔽的用户';
+    } else {
+      responseText = `当前被屏蔽的用户列表（共${totalCount}人，第${page}/${totalPages}页）：\n\n`;
+      
+      blockedUsersWithDetails.forEach((user, index) => {
+        const displayIndex = startIndex + index + 1;
+        // 格式化屏蔽时间
+        const blockedTime = new Date(user.blockedAt).toLocaleString('zh-CN');
+        // 获取关键字，只显示一行
+        const keywordsText = user.matchedKeywords && user.matchedKeywords.length > 0
+          ? ` [关键字: ${user.matchedKeywords.slice(0, 3).join(', ')}${user.matchedKeywords.length > 3 ? '...' : ''}]`
+          : '';
+        
+        responseText += `${displayIndex}. ${user.userName || '未知用户'} (ID: ${user.userId}) - ${blockedTime}${keywordsText}\n`;
+      });
+      
+      // 添加分页导航信息
+      if (totalPages > 1) {
+        responseText += '\n';
+        if (page > 1) {
+          responseText += `/listblocked ${page - 1} - 上一页\n`;
+        }
+        if (page < totalPages) {
+          responseText += `/listblocked ${page + 1} - 下一页`;
+        }
+      }
+    }
     
     // 返回结果给管理员
     return sendMessage({
       chat_id: ADMIN_UID,
-      text: blockedUsers.length > 0 
-        ? `当前被屏蔽的用户列表（共${blockedUsers.length}人）：\n${blockedUsers.join('\n')}`
-        : '当前没有被屏蔽的用户'
+      text: responseText
     });
   } catch (error) {
     console.error('获取被屏蔽用户列表失败:', error);
