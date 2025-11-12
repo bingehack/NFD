@@ -13,6 +13,8 @@ const enable_notification = false // 保持与原working.js一致
 const KEYWORD_FILTERS_KEY = 'keyword_filters';
 // 默认的屏蔽关键词列表
 const DEFAULT_KEYWORDS = ['领钱', '充值', '担保', '回馈客户', '彩金','协议','手续费','合作共赢'];
+const ADMIN_NOTIFICATIONS_KEY = 'admin_notifications';
+const NOTIFICATION_EXPIRY_HOURS = 24; // 消息过期时间：24小时
 
 /**
  * Return url to telegram api, optionally with parameters added
@@ -159,6 +161,9 @@ async function handleWebhook (event) {
     return new Response('Unauthorized', { status: 403 })
   }
 
+  // 检查并删除过期的管理员通知消息
+  event.waitUntil(deleteExpiredNotifications());
+
   // Read request body synchronously
   const update = await event.request.json()
   // Deal with response asynchronously
@@ -253,10 +258,16 @@ async function handleGuestMessage(message){
     const violatingLinesText = keywordCheck.violatingLines.map(line => `"${line}"`).join('\n');
     const matchedKeywordsText = keywordCheck.matchedKeywords.join('、');
     
-    await sendMessage({
+    // 发送消息并保存消息ID用于后续删除
+    const messageResponse = await sendMessage({
       chat_id: ADMIN_UID,
       text: `用户 UID:${chatId} 因发送包含屏蔽关键词的消息被自动屏蔽\n\n违规内容:\n${violatingLinesText}\n\n触发的关键字: ${matchedKeywordsText}`
     });
+    
+    // 如果消息发送成功，保存消息ID和过期时间
+    if (messageResponse && messageResponse.ok) {
+      await saveAdminNotification(messageResponse.result.message_id, ADMIN_UID);
+    }
     
     // 通知用户
     return sendMessage({
@@ -275,6 +286,76 @@ async function handleGuestMessage(message){
     await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
   return handleNotify(message)
+}
+
+/**
+ * 保存管理员通知消息信息，用于后续删除
+ * @param {number} messageId 消息ID
+ * @param {number} chatId 聊天ID
+ */
+async function saveAdminNotification(messageId, chatId) {
+  try {
+    // 获取当前存储的所有通知
+    let notifications = await nfd.get(ADMIN_NOTIFICATIONS_KEY, { type: 'json' }) || [];
+    
+    // 计算过期时间（当前时间 + 24小时）
+    const expiryTime = Date.now() + (NOTIFICATION_EXPIRY_HOURS * 60 * 60 * 1000);
+    
+    // 添加新通知
+    notifications.push({
+      messageId: messageId,
+      chatId: chatId,
+      sentAt: Date.now(),
+      expiryTime: expiryTime
+    });
+    
+    // 保存更新后的通知列表
+    await nfd.put(ADMIN_NOTIFICATIONS_KEY, JSON.stringify(notifications));
+  } catch (error) {
+    console.error('保存管理员通知失败:', error);
+  }
+}
+
+/**
+ * 检查并删除过期的管理员通知消息
+ */
+async function deleteExpiredNotifications() {
+  try {
+    const currentTime = Date.now();
+    let notifications = await nfd.get(ADMIN_NOTIFICATIONS_KEY, { type: 'json' }) || [];
+    let activeNotifications = [];
+    
+    for (const notification of notifications) {
+      // 如果消息已过期，则删除它
+      if (notification.expiryTime <= currentTime) {
+        // 尝试删除消息
+        try {
+          await requestTelegram('deleteMessage', makeReqBody({
+            chat_id: notification.chatId,
+            message_id: notification.messageId
+          }));
+          console.log(`已删除过期消息: ${notification.messageId}`);
+        } catch (deleteError) {
+          // 忽略删除失败的消息，例如消息可能已经被手动删除
+          console.error(`删除消息失败: ${notification.messageId}, 错误: ${deleteError.message}`);
+        }
+      } else {
+        // 保留未过期的通知
+        activeNotifications.push(notification);
+      }
+    }
+    
+    // 更新存储，只保留未过期的通知
+    await nfd.put(ADMIN_NOTIFICATIONS_KEY, JSON.stringify(activeNotifications));
+    
+    return {
+      totalChecked: notifications.length,
+      deleted: notifications.length - activeNotifications.length
+    };
+  } catch (error) {
+    console.error('检查和删除过期通知失败:', error);
+    return { error: error.message };
+  }
 }
 
 async function handleNotify(message){
