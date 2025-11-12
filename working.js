@@ -73,17 +73,37 @@ async function getKeywordFilters() {
 }
 
 /**
- * 检查消息是否包含屏蔽关键字
+ * 检查消息是否包含屏蔽关键字，并返回违规行信息
+ * @returns {Object} {isBlocked: boolean, violatingLines: string[], matchedKeywords: string[]}
  */
 async function containsBlockedKeyword(message) {
-  if (!message || !message.text) return false;
+  if (!message || !message.text) {
+    return { isBlocked: false, violatingLines: [], matchedKeywords: [] };
+  }
   
   const keywords = await getKeywordFilters();
-  const lowerText = message.text.toLowerCase();
+  const lines = message.text.split('\n');
+  const violatingLines = [];
+  const matchedKeywords = [];
   
-  return keywords.some(keyword => 
-    lowerText.includes(keyword.toLowerCase())
-  );
+  // 检查每一行是否包含违规关键字
+  lines.forEach(line => {
+    const lowerLine = line.toLowerCase();
+    keywords.forEach(keyword => {
+      if (lowerLine.includes(keyword.toLowerCase())) {
+        violatingLines.push(line);
+        if (!matchedKeywords.includes(keyword)) {
+          matchedKeywords.push(keyword);
+        }
+      }
+    });
+  });
+  
+  return {
+    isBlocked: violatingLines.length > 0,
+    violatingLines: [...new Set(violatingLines)], // 去重
+    matchedKeywords: [...new Set(matchedKeywords)] // 去重
+  };
 }
 
 /**
@@ -224,14 +244,18 @@ async function handleGuestMessage(message){
   }
   
   // 检查消息是否包含屏蔽关键字
-  if (await containsBlockedKeyword(message)) {
+  const keywordCheck = await containsBlockedKeyword(message);
+  if (keywordCheck.isBlocked) {
     // 自动屏蔽用户
     await nfd.put('isblocked-' + chatId, true);
     
-    // 通知管理员
+    // 通知管理员，只包含违规行而不是完整内容
+    const violatingLinesText = keywordCheck.violatingLines.map(line => `"${line}"`).join('\n');
+    const matchedKeywordsText = keywordCheck.matchedKeywords.join('、');
+    
     await sendMessage({
       chat_id: ADMIN_UID,
-      text: `用户 UID:${chatId} 因发送包含屏蔽关键词的消息被自动屏蔽\n消息内容: ${message.text}`
+      text: `用户 UID:${chatId} 因发送包含屏蔽关键词的消息被自动屏蔽\n\n违规内容:\n${violatingLinesText}\n\n触发的关键字: ${matchedKeywordsText}`
     });
     
     // 通知用户
