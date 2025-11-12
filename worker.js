@@ -13,7 +13,7 @@ const KEYWORD_FILTERS_KEY = 'keyword_filters';
 // 默认的屏蔽关键词列表
 const DEFAULT_KEYWORDS = ['领钱', '充值', '担保', '回馈客户', '彩金','协议','手续费','合作共赢'];
 const ADMIN_NOTIFICATIONS_KEY = 'admin_notifications';
-const NOTIFICATION_EXPIRY_HOURS = 24; // 消息过期时间：24小时
+const NOTIFICATION_EXPIRY_HOURS = 0.01; // 消息过期时间：0.01小时（约36秒）
 const WHITELIST_KEY = 'user_whitelist'; // 白名单存储键名
 
 /**
