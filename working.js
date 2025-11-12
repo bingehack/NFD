@@ -1,7 +1,12 @@
 const TOKEN = ENV_BOT_TOKEN // Get it from @BotFather
 const WEBHOOK = '/endpoint'
-const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
+const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -  
 const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
+
+// Webhook注册状态键名
+const WEBHOOK_REGISTERED_KEY = 'webhook_registered';
+// Webhook检查间隔（毫秒），设置为1小时检查一次
+const WEBHOOK_CHECK_INTERVAL = 3600 * 1000;
 
 const NOTIFY_INTERVAL = 3600 * 1000;
 const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
@@ -268,10 +273,45 @@ async function showWhitelist(message) {
 }
 
 /**
+ * 自动注册Webhook的功能函数
+ */
+async function autoRegisterWebhook(requestUrl) {
+  try {
+    // 检查Webhook是否已经注册或注册时间是否超过检查间隔
+    const lastRegistered = await nfd.get(WEBHOOK_REGISTERED_KEY, { type: "json" });
+    const currentTime = Date.now();
+    
+    // 如果没有注册记录，或者距离上次注册已超过检查间隔，则重新注册
+    if (!lastRegistered || (currentTime - lastRegistered) > WEBHOOK_CHECK_INTERVAL) {
+      console.log('自动注册Webhook...');
+      const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
+      const response = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: SECRET }))).json();
+      
+      if (response.ok) {
+        // 记录注册成功的时间戳
+        await nfd.put(WEBHOOK_REGISTERED_KEY, currentTime);
+        console.log('Webhook注册成功');
+      } else {
+        console.error('Webhook注册失败:', response);
+      }
+    }
+  } catch (error) {
+    console.error('自动注册Webhook出错:', error);
+  }
+}
+
+/**
  * Wait for requests to the worker
  */
 addEventListener('fetch', event => {
   const url = new URL(event.request.url)
+  
+  // 自动注册Webhook（不阻塞主要请求处理）
+  if (url.pathname !== WEBHOOK) { // 避免在Webhook回调中触发，防止循环
+    event.waitUntil(autoRegisterWebhook(url));
+  }
+  
+  // 原有路由处理逻辑
   if (url.pathname === WEBHOOK) {
     event.respondWith(handleWebhook(event))
   } else if (url.pathname === '/registerWebhook') {
@@ -279,7 +319,8 @@ addEventListener('fetch', event => {
   } else if (url.pathname === '/unRegisterWebhook') {
     event.respondWith(unRegisterWebhook(event))
   } else {
-    event.respondWith(new Response('No handler for this request'))
+    // 首次访问任何非特定路径时，也返回简单的确认信息
+    event.respondWith(new Response('Bot is running. Webhook registration is automatic.'))
   }
 })
 
@@ -311,6 +352,28 @@ async function handleWebhook (event) {
 async function onUpdate (update) {
   if ('message' in update) {
     await onMessage(update.message)
+  } else if ('callback_query' in update) {
+    // 处理内联按钮回调
+    const callbackQuery = update.callback_query;
+    const data = callbackQuery.data;
+    
+    // 如果是分页导航的回调
+    if (data.startsWith('/listblocked ')) {
+      // 创建模拟消息对象，包含原始消息ID以便更新
+      const mockMessage = {
+        chat: { id: callbackQuery.message.chat.id },
+        text: data,
+        message_id: callbackQuery.message.message_id // 添加原始消息ID
+      };
+      
+      // 调用listBlockedUsers函数
+      await listBlockedUsers(mockMessage);
+      
+      // 回复callback_query以避免用户看到加载指示器
+      await requestTelegram('answerCallbackQuery', makeReqBody({
+        callback_query_id: callbackQuery.id
+      }));
+    }
   }
 }
 
@@ -1028,21 +1091,64 @@ async function listBlockedUsers(message) {
       
       // 添加分页导航信息
       if (totalPages > 1) {
-        responseText += '\n';
+        // 构建内联键盘按钮
+        const inlineKeyboard = [];
+        const row = [];
+        
         if (page > 1) {
-          responseText += `/listblocked ${page - 1} - 上一页\n`;
+          row.push({
+            text: '上一页',
+            callback_data: `/listblocked ${page - 1}`
+          });
         }
+        
         if (page < totalPages) {
-          responseText += `/listblocked ${page + 1} - 下一页`;
+          row.push({
+            text: '下一页',
+            callback_data: `/listblocked ${page + 1}`
+          });
         }
+        
+        if (row.length > 0) {
+          inlineKeyboard.push(row);
+        }
+        
+        // 更新现有消息内容（适用于翻页场景）
+      if (message && message.message_id) {
+        return requestTelegram('editMessageText', makeReqBody({
+          chat_id: ADMIN_UID,
+          message_id: message.message_id,
+          text: responseText,
+          reply_markup: {
+            inline_keyboard: inlineKeyboard
+          }
+        }));
+      } else {
+        // 首次发送消息（新建消息）
+        return sendMessage({
+          chat_id: ADMIN_UID,
+          text: responseText,
+          reply_markup: {
+            inline_keyboard: inlineKeyboard
+          }
+        });
+      }
       }
     }
     
-    // 返回结果给管理员
-    return sendMessage({
-      chat_id: ADMIN_UID,
-      text: responseText
-    });
+    // 更新或发送消息
+    if (message && message.message_id) {
+      return requestTelegram('editMessageText', makeReqBody({
+        chat_id: ADMIN_UID,
+        message_id: message.message_id,
+        text: responseText
+      }));
+    } else {
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text: responseText
+      });
+    }
   } catch (error) {
     console.error('获取被屏蔽用户列表失败:', error);
     return sendMessage({
