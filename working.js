@@ -19,7 +19,7 @@ const KEYWORD_FILTERS_KEY = 'keyword_filters';
 // 默认的屏蔽关键词列表
 const DEFAULT_KEYWORDS = ['领钱', '充值', '担保', '回馈客户', '彩金','协议','手续费','合作共赢'];
 const ADMIN_NOTIFICATIONS_KEY = 'admin_notifications';
-const NOTIFICATION_EXPIRY_HOURS = 0.5; // 消息过期时间：0.01小时（约36秒）
+const NOTIFICATION_EXPIRY_HOURS = 1; // 消息过期时间：0.01小时（约36秒）
 const WHITELIST_KEY = 'user_whitelist'; // 白名单存储键名
 // 存储被屏蔽用户详细信息的键名前缀
 const BLOCKED_USER_INFO_PREFIX = 'blocked-user-info-';
@@ -126,6 +126,30 @@ async function containsBlockedKeyword(message) {
     violatingLines: [...new Set(violatingLines)], // 去重
     matchedKeywords: [...new Set(matchedKeywords)] // 去重
   };
+}
+
+/**
+ * 检查消息是否是转发消息（包括文本、链接和媒体内容）
+ * @param {Object} message Telegram消息对象
+ * @returns {Object} 检测结果
+ */
+async function isForwardedLinkOrMedia(message) {
+  // 检查是否是转发消息
+  if (!message.forward_from && !message.forward_from_chat) {
+    return { isBlocked: false, reason: '' };
+  }
+  
+  // 如果是转发的消息，直接返回需要屏蔽
+  // 判断转发来源类型
+  if (message.forward_from_chat) {
+    // 来自频道或群组的转发
+    return { isBlocked: true, reason: '转发的群组/频道消息' };
+  } else if (message.forward_from) {
+    // 来自用户的转发
+    return { isBlocked: true, reason: '转发的用户消息' };
+  }
+  
+  return { isBlocked: false, reason: '' };
 }
 
 /**
@@ -695,6 +719,70 @@ async function handleGuestMessage(message){
     });
   }
 
+  // 检查是否是转发的链接或媒体内容（白名单用户不受限制）
+  if (!isWhitelisted) {
+    const forwardedLinkMediaCheck = await isForwardedLinkOrMedia(message);
+    if (forwardedLinkMediaCheck.isBlocked) {
+      // 自动屏蔽用户
+      await nfd.put('isblocked-' + chatId, true);
+      
+      // 获取用户信息
+      let userName = message.from ? `${message.from.first_name || ''} ${message.from.last_name || ''}`.trim() || '未知用户' : '未知用户';
+      
+      // 创建屏蔽用户信息对象
+      const blockInfo = {
+        userId: chatId,
+        userName: userName,
+        userType: 'user',
+        blockedAt: Date.now(),
+        blockingReason: `自动屏蔽（${forwardedLinkMediaCheck.reason}）`,
+        matchedKeywords: [forwardedLinkMediaCheck.reason],
+        violatingLines: ['转发的链接或媒体内容']
+      };
+      
+      // 存储用户详细信息
+      await nfd.put(BLOCKED_USER_INFO_PREFIX + chatId, JSON.stringify(blockInfo));
+      
+      // 更新屏蔽用户索引
+      const blockedUsersIndex = await getBlockedUsersIndex();
+      const existingIndex = blockedUsersIndex.findIndex(item => item.userId === chatId);
+      if (existingIndex === -1) {
+        blockedUsersIndex.push({
+          userId: chatId,
+          blockedAt: Date.now()
+        });
+        await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(blockedUsersIndex));
+      }
+      
+      // 获取转发来源信息
+      let forwardSourceInfo = '';
+      if (message.forward_from_chat) {
+        forwardSourceInfo = `频道: ${message.forward_from_chat.title}`;
+      } else if (message.forward_from) {
+        forwardSourceInfo = `用户: ${message.forward_from.first_name || ''}`;
+        if (message.forward_from.last_name) forwardSourceInfo += ` ${message.forward_from.last_name}`;
+        if (message.forward_from.username) forwardSourceInfo += ` (@${message.forward_from.username})`;
+      }
+      
+      // 通知管理员
+      const messageResponse = await sendMessage({
+        chat_id: ADMIN_UID,
+        text: `用户 UID:${chatId} 因${forwardedLinkMediaCheck.reason}被自动屏蔽\n\n用户: ${userName}\n转发来源: ${forwardSourceInfo || '未知'}`
+      });
+      
+      // 保存通知信息
+      if (messageResponse && messageResponse.ok) {
+        await saveAdminNotification(messageResponse.result.message_id, ADMIN_UID);
+      }
+      
+      // 通知用户
+      return sendMessage({
+        chat_id: chatId,
+        text: 'Your are blocked for sending forwarded links or media content.'
+      });
+    }
+  }
+  
   let forwardReq = await forwardMessage({
     chat_id:ADMIN_UID,
     from_chat_id:message.chat.id,
