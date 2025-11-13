@@ -89,7 +89,6 @@ async function getKeywordFilters() {
     }
     return keywords;
   } catch (error) {
-    console.error('获取关键字列表失败:', error);
     // 错误情况下也不应该重置现有数据，只返回默认值供本次使用
     return DEFAULT_KEYWORDS;
   }
@@ -169,7 +168,6 @@ async function getWhitelist() {
     }
     return whitelist;
   } catch (error) {
-    console.error('获取白名单失败:', error);
     return [];
   }
 }
@@ -185,7 +183,6 @@ async function isInWhitelist(userId) {
     const stringUserId = String(userId);
     return whitelist.includes(stringUserId);
   } catch (error) {
-    console.error('检查白名单失败:', error);
     return false;
   }
 }
@@ -208,7 +205,6 @@ async function addToWhitelist(userId) {
     
     return whitelist;
   } catch (error) {
-    console.error('添加白名单失败:', error);
     return await getWhitelist();
   }
 }
@@ -229,7 +225,6 @@ async function removeFromWhitelist(userId) {
     
     return whitelist;
   } catch (error) {
-    console.error('移除白名单失败:', error);
     return await getWhitelist();
   }
 }
@@ -240,23 +235,16 @@ async function removeFromWhitelist(userId) {
  */
 async function getBlockedUsersIndex() {
   try {
-    console.log(`开始获取屏蔽用户索引，键名: ${BLOCKED_USERS_INDEX_KEY}`);
     const index = await nfd.get(BLOCKED_USERS_INDEX_KEY, { type: 'json' });
-    console.log(`获取到的索引原始值:`, index);
     
     // 如果索引不存在或不是数组，初始化一个空数组
     if (!index || !Array.isArray(index)) {
-      console.log('索引不存在或不是数组，初始化空数组');
       await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify([]));
-      console.log('空数组初始化完成');
       return [];
     }
     
-    console.log(`获取到有效的屏蔽用户索引，数量: ${index.length}`);
     return index;
   } catch (error) {
-    console.error('获取屏蔽用户索引失败:', error.message || error);
-    console.error('错误堆栈:', error.stack);
     return [];
   }
 }
@@ -357,16 +345,11 @@ async function listWhitelist(message, page = 1, messageId = null) {
           editOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
         }
         
-        // 记录编辑消息操作
-        console.log(`编辑白名单消息 (页码: ${page}, 消息ID: ${messageId})`);
-        
         // 执行编辑消息
         const editResult = await editMessageText(editOptions);
-        console.log(`白名单消息编辑结果: ${editResult.ok}`);
         
         return editResult;
       } catch (editError) {
-        console.error(`编辑白名单消息失败: ${editError.message}`);
         // 编辑失败时，继续执行发送新消息的逻辑
       }
     }
@@ -383,20 +366,14 @@ async function listWhitelist(message, page = 1, messageId = null) {
         sendOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
       }
       
-      // 记录发送消息操作
-      console.log(`发送白名单消息 (页码: ${page})`);
-      
       // 执行发送消息
       const sendResult = await sendMessage(sendOptions);
-      console.log(`白名单消息发送结果: ${sendResult.ok}`);
       
       return sendResult;
     } catch (sendError) {
-      console.error(`发送白名单消息失败: ${sendError.message}`);
       throw sendError;
     }
   } catch (error) {
-    console.error('显示白名单失败:', error);
     return sendMessage({
       chat_id: message.chat ? message.chat.id : message.callback_query.from.id,
       text: '显示白名单失败，请稍后再试'
@@ -415,21 +392,20 @@ async function autoRegisterWebhook(requestUrl) {
     
     // 如果没有注册记录，或者距离上次注册已超过检查间隔，则重新注册
     if (!lastRegistered || (currentTime - lastRegistered) > WEBHOOK_CHECK_INTERVAL) {
-      console.log('自动注册Webhook...');
+
       const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
       const response = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: SECRET }))).json();
       
       if (response.ok) {
         // 记录注册成功的时间戳
         await nfd.put(WEBHOOK_REGISTERED_KEY, currentTime);
-        console.log('Webhook注册成功');
+
       } else {
-        console.error('Webhook注册失败:', response);
+
       }
     }
   } catch (error) {
-    console.error('自动注册Webhook出错:', error);
-  }
+    }
 }
 
 /**
@@ -528,7 +504,7 @@ async function onUpdate (update) {
  * https://core.telegram.org/bots/api#message
  */
 async function onMessage (message) {
-  console.log(`[DEBUG] onMessage called, message text: ${message.text}, chat.id: ${message.chat.id}, ADMIN_UID: ${ADMIN_UID}`);
+
   
   if(message.text === '/start'){
     // 由于startMsgUrl被注释，这里返回一个简单的欢迎消息
@@ -538,7 +514,7 @@ async function onMessage (message) {
     })
   }
   // 在onMessage函数中添加/listblocked命令处理
-  console.log(`[DEBUG] Checking admin access: ${message.chat.id.toString()} === ${ADMIN_UID} ? ${message.chat.id.toString() === ADMIN_UID}`);
+
   if(message.chat.id.toString() === ADMIN_UID){
         if(!message?.reply_to_message?.chat){
           // 检查是否是关键词管理命令
@@ -554,7 +530,6 @@ async function onMessage (message) {
             return handleRemoveKeyword(message, keyword);
           }
           if(message.text.startsWith('/listblocked')) {
-            console.log(`[DEBUG] Processing /listblocked command`);
             return listBlockedUsers(message);
           }
           // 白名单管理命令
@@ -725,7 +700,7 @@ async function handleGuestMessage(message){
     from_chat_id:message.chat.id,
     message_id:message.message_id
   })
-  console.log(JSON.stringify(forwardReq))
+
   if(forwardReq.ok){
     await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
@@ -756,7 +731,6 @@ async function saveAdminNotification(messageId, chatId) {
     // 保存更新后的通知列表
     await nfd.put(ADMIN_NOTIFICATIONS_KEY, JSON.stringify(notifications));
   } catch (error) {
-    console.error('保存管理员通知失败:', error);
   }
 }
 
@@ -778,10 +752,10 @@ async function deleteExpiredNotifications() {
             chat_id: notification.chatId,
             message_id: notification.messageId
           }));
-          console.log(`已删除过期消息: ${notification.messageId}`);
+
         } catch (deleteError) {
           // 忽略删除失败的消息，例如消息可能已经被手动删除
-          console.error(`删除消息失败: ${notification.messageId}, 错误: ${deleteError.message}`);
+
         }
       } else {
         // 保留未过期的通知
@@ -797,7 +771,6 @@ async function deleteExpiredNotifications() {
       deleted: notifications.length - activeNotifications.length
     };
   } catch (error) {
-    console.error('检查和删除过期通知失败:', error);
     return { error: error.message };
   }
 }
@@ -1021,7 +994,6 @@ async function handleUnBlock(message){
     const filteredIndex = blockedUsersIndex.filter(item => item.userId !== guestChantId);
     await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify(filteredIndex));
   } catch (error) {
-    console.error('删除屏蔽用户信息失败:', error);
   }
 
   return sendMessage({
@@ -1151,16 +1123,11 @@ async function listKeywords(message, page = 1, messageId = null) {
           editOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
         }
         
-        // 记录编辑消息操作
-        console.log(`编辑关键字消息 (页码: ${page}, 消息ID: ${messageId})`);
-        
         // 执行编辑消息
         const editResult = await editMessageText(editOptions);
-        console.log(`关键字消息编辑结果: ${editResult.ok}`);
         
         return editResult;
       } catch (editError) {
-        console.error(`编辑关键字消息失败: ${editError.message}`);
         // 编辑失败时，继续执行发送新消息的逻辑
       }
     }
@@ -1177,20 +1144,14 @@ async function listKeywords(message, page = 1, messageId = null) {
         sendOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
       }
       
-      // 记录发送消息操作
-      console.log(`发送关键字消息 (页码: ${page})`);
-      
       // 执行发送消息
       const sendResult = await sendMessage(sendOptions);
-      console.log(`关键字消息发送结果: ${sendResult.ok}`);
       
       return sendResult;
     } catch (sendError) {
-      console.error(`发送关键字消息失败: ${sendError.message}`);
       throw sendError;
     }
   } catch (error) {
-    console.error('显示关键字列表失败:', error);
     return sendMessage({
       chat_id: message.chat ? message.chat.id : message.callback_query.from.id,
       text: '显示关键字列表失败，请稍后再试'

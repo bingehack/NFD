@@ -60,7 +60,7 @@ async function saveAdminNotification(messageId, chatId) {
     // 保存更新后的通知列表
     await nfd.put(ADMIN_NOTIFICATIONS_KEY, JSON.stringify(notifications));
   } catch (error) {
-    console.error('保存管理员通知失败:', error);
+    // 静默失败，不记录日志
   }
 }
 
@@ -82,10 +82,8 @@ async function deleteExpiredNotifications() {
             chat_id: notification.chatId,
             message_id: notification.messageId
           }));
-          console.log(`已删除过期消息: ${notification.messageId}`);
         } catch (deleteError) {
-          // 忽略删除失败的消息，例如消息可能已经被手动删除
-          console.error(`删除消息失败: ${notification.messageId}, 错误: ${deleteError.message}`);
+          // 静默忽略删除失败的消息
         }
       } else {
         // 保留未过期的通知
@@ -101,8 +99,8 @@ async function deleteExpiredNotifications() {
       deleted: notifications.length - activeNotifications.length
     };
   } catch (error) {
-    console.error('检查和删除过期通知失败:', error);
-    return { error: error.message };
+    // 静默失败，不记录日志
+    return { error: '处理错误' };
   }
 }
   return `https://api.telegram.org/bot${TOKEN}/${methodName}${query}`
@@ -312,23 +310,16 @@ async function removeFromWhitelist(userId) {
  */
 async function getBlockedUsersIndex() {
   try {
-    console.log(`开始获取屏蔽用户索引，键名: ${BLOCKED_USERS_INDEX_KEY}`);
     const index = await nfd.get(BLOCKED_USERS_INDEX_KEY, { type: 'json' });
-    console.log(`获取到的索引原始值:`, index);
     
     // 如果索引不存在或不是数组，初始化一个空数组
     if (!index || !Array.isArray(index)) {
-      console.log('索引不存在或不是数组，初始化空数组');
       await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify([]));
-      console.log('空数组初始化完成');
       return [];
     }
     
-    console.log(`获取到有效的屏蔽用户索引，数量: ${index.length}`);
     return index;
   } catch (error) {
-    console.error('获取屏蔽用户索引失败:', error.message || error);
-    console.error('错误堆栈:', error.stack);
     return [];
   }
 }
@@ -372,20 +363,16 @@ async function autoRegisterWebhook(requestUrl) {
     
     // 如果没有注册记录，或者距离上次注册已超过检查间隔，则重新注册
     if (!lastRegistered || (currentTime - lastRegistered) > WEBHOOK_CHECK_INTERVAL) {
-      console.log('自动注册Webhook...');
       const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
       const response = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: SECRET }))).json();
       
       if (response.ok) {
         // 记录注册成功的时间戳
         await nfd.put(WEBHOOK_REGISTERED_KEY, currentTime);
-        console.log('Webhook注册成功');
-      } else {
-        console.error('Webhook注册失败:', response);
       }
     }
   } catch (error) {
-    console.error('自动注册Webhook出错:', error);
+    // 静默失败
   }
 }
 
@@ -485,7 +472,6 @@ async function onUpdate (update) {
  * https://core.telegram.org/bots/api#message
  */
 async function onMessage (message) {
-  console.log(`[DEBUG] onMessage called, message text: ${message.text}, chat.id: ${message.chat.id}, ADMIN_UID: ${ADMIN_UID}`);
   
   if(message.text === '/start'){
     let startMsg = await fetch(startMsgUrl).then(r => r.text())
@@ -495,7 +481,6 @@ async function onMessage (message) {
     })
   }
   // 在onMessage函数中添加/listblocked命令处理
-  console.log(`[DEBUG] Checking admin access: ${message.chat.id.toString()} === ${ADMIN_UID} ? ${message.chat.id.toString() === ADMIN_UID}`);
   if(message.chat.id.toString() === ADMIN_UID){
         if(!message?.reply_to_message?.chat){
           // 检查是否是关键词管理命令
@@ -993,11 +978,9 @@ async function listKeywords(message, page = 1, messageId = null) {
         
         // 执行编辑消息
         const editResult = await editMessageText(editOptions);
-        console.log(`关键字消息编辑结果: ${editResult.ok}`);
         
         return editResult;
       } catch (editError) {
-        console.error(`编辑关键字消息失败: ${editError.message}`);
         // 编辑失败时，继续执行发送新消息的逻辑
       }
     }
@@ -1016,15 +999,12 @@ async function listKeywords(message, page = 1, messageId = null) {
       
       // 执行发送消息
       const sendResult = await sendMessage(sendOptions);
-      console.log(`关键字消息发送结果: ${sendResult.ok}`);
       
       return sendResult;
     } catch (sendError) {
-      console.error(`发送关键字消息失败: ${sendError.message}`);
       throw sendError;
     }
   } catch (error) {
-    console.error('显示关键字失败:', error);
     return sendMessage({
       chat_id: message.chat ? message.chat.id : message.callback_query.from.id,
       text: '显示关键字失败，请稍后再试'
@@ -1081,7 +1061,6 @@ async function handleAddKeyword(message, keyword) {
       text: response
     });
   } catch (error) {
-    console.error('添加关键字失败:', error);
     return sendMessage({
       chat_id: ADMIN_UID,
       text: '添加关键字时发生错误，请稍后再试'
@@ -1142,9 +1121,7 @@ async function isFraud(id){
   id = id.toString()
   let db = await fetch(fraudDb).then(r => r.text())
   let arr = db.split('\n').filter(v => v)
-  console.log(JSON.stringify(arr))
   let flag = arr.filter(v => v === id).length !== 0
-  console.log(flag)
   return flag
 }
 
@@ -1155,9 +1132,6 @@ async function isFraud(id){
  */
 async function listBlockedUsers(message) {
   try {
-    console.log('listBlockedUsers function called with message:', JSON.stringify(message));
-    console.log('开始执行listBlockedUsers函数');
-    
     // 获取页码参数，默认为第1页
     let page = 1;
     const messageText = message.text || '';
@@ -1166,34 +1140,26 @@ async function listBlockedUsers(message) {
       page = parseInt(pageMatch[1], 10);
       if (page < 1) page = 1;
     }
-    console.log(`请求的页码: ${page}`);
     
     // 提前声明内联键盘变量，避免后面引用未定义变量
     let inlineKeyboard = [];
     
     // 获取所有被屏蔽用户的索引
-    console.log('开始获取被屏蔽用户索引...');
     let blockedUsersIndex = await getBlockedUsersIndex();
-    console.log(`获取到的屏蔽用户索引数量: ${blockedUsersIndex.length}`);
     
     // 过滤出仍然被屏蔽的用户
-    console.log('开始过滤仍然被屏蔽的用户...');
     const activeBlockedUsers = [];
     for (const indexItem of blockedUsersIndex) {
       const blockKey = 'isblocked-' + indexItem.userId;
-      console.log(`检查用户${indexItem.userId}是否被屏蔽，键名: ${blockKey}`);
       try {
         const isBlocked = await nfd.get(blockKey, { type: "json" });
-        console.log(`用户${indexItem.userId}屏蔽状态:`, isBlocked);
         if (isBlocked === true) {
           activeBlockedUsers.push(indexItem);
-          console.log(`用户${indexItem.userId}已添加到活跃屏蔽列表`);
         }
       } catch (error) {
-        console.error(`获取用户${indexItem.userId}屏蔽状态失败:`, error.message || error);
+        // 静默忽略错误
       }
     }
-    console.log(`过滤后活跃屏蔽用户数量: ${activeBlockedUsers.length}`);
 
     
     // 按屏蔽时间倒序排序（最新的排在前面）
@@ -1206,22 +1172,15 @@ async function listBlockedUsers(message) {
     const endIndex = Math.min(startIndex + PAGE_SIZE, totalCount);
     const paginatedUsers = activeBlockedUsers.slice(startIndex, endIndex);
     
-    console.log(`分页信息: 总数=${totalCount}, 总页数=${totalPages}, 当前页=${page}`);
-    console.log(`当前页用户数量: ${paginatedUsers.length}`);
-    
     // 获取当前页用户的详细信息
-    console.log('开始获取当前页用户详细信息...');
     const blockedUsersWithDetails = [];
     for (const userIndex of paginatedUsers) {
       let userInfo = null;
       const userInfoKey = BLOCKED_USER_INFO_PREFIX + userIndex.userId;
-      console.log(`获取用户${userIndex.userId}详细信息，键名: ${userInfoKey}`);
       try {
         userInfo = await nfd.get(userInfoKey, { type: "json" });
-        console.log(`用户${userIndex.userId}详细信息:`, userInfo);
       } catch (error) {
-        console.error(`获取用户${userIndex.userId}详细信息失败:`, error.message || error);
-        console.error('错误堆栈:', error.stack);
+        // 静默忽略错误
       }
       
       const combinedUserInfo = {
@@ -1229,9 +1188,7 @@ async function listBlockedUsers(message) {
         ...(userInfo || { userName: '未知用户', matchedKeywords: [] })
       };
       blockedUsersWithDetails.push(combinedUserInfo);
-      console.log(`用户${userIndex.userId}信息已添加到结果列表`);
     }
-    console.log(`用户详细信息获取完成，共${blockedUsersWithDetails.length}条记录`);
     
     // 构建回复消息
     let responseText = '';
@@ -1280,19 +1237,16 @@ async function listBlockedUsers(message) {
         }
     }
     
-    // 准备发送或更新消息...
-    console.log('准备发送或更新消息...');
+    // 准备发送或更新消息
     const targetChatId = message.chat.id;
     
     // 检查是否是分页导航回调（通过callback_query或特定格式判断）
     // 对于分页导航，我们应该优先编辑现有消息
     const isPaginationCallback = message.callback_query || 
                                 (messageText.startsWith('/listblocked') && messageText.match(/\s+\d+$/));
-    console.log(`是否为分页导航回调: ${isPaginationCallback}`);
     
     // 如果是分页导航且有消息ID，优先编辑消息
     if (isPaginationCallback && message && message.message_id) {
-      console.log('分页导航请求，优先尝试编辑消息');
       try {
         if (totalPages > 1) {
           const editResult = await requestTelegram('editMessageText', makeReqBody({
@@ -1303,7 +1257,6 @@ async function listBlockedUsers(message) {
               inline_keyboard: inlineKeyboard
             }
           }));
-          console.log(`更新消息结果:`, editResult);
           return editResult;
         } else {
           const editResult = await requestTelegram('editMessageText', makeReqBody({
@@ -1311,19 +1264,15 @@ async function listBlockedUsers(message) {
             message_id: message.message_id,
             text: responseText
           }));
-          console.log(`更新消息结果:`, editResult);
           return editResult;
         }
       } catch (editError) {
-        console.error('编辑消息失败，转为发送新消息:', editError);
         // 编辑失败后，回退到发送新消息
       }
     }
     
     // 初始请求或编辑失败时，发送新消息
     try {
-      console.log('初始请求或编辑失败，发送新消息');
-      
       // 如果有多页，包含内联键盘
       if (totalPages > 1) {
         const sendResult = await sendMessage({
@@ -1333,22 +1282,18 @@ async function listBlockedUsers(message) {
             inline_keyboard: inlineKeyboard
           }
         });
-        console.log(`发送消息结果:`, sendResult);
         return sendResult;
       } else {
         const sendResult = await sendMessage({
           chat_id: targetChatId,
           text: responseText
         });
-        console.log(`发送消息结果:`, sendResult);
         return sendResult;
       }
     } catch (error) {
-      console.error('发送消息失败:', error);
       throw error;
     }
   } catch (error) {
-    console.error('获取被屏蔽用户列表失败:', error);
     return sendMessage({
       chat_id: message.chat.id,
       text: '获取被屏蔽用户列表时发生错误'
