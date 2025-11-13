@@ -99,12 +99,14 @@ async function getKeywordFilters() {
  * @returns {Object} {isBlocked: boolean, violatingLines: string[], matchedKeywords: string[]}
  */
 async function containsBlockedKeyword(message) {
-  if (!message || !message.text) {
+  if (!message || (!message.text && !message.caption)) {
     return { isBlocked: false, violatingLines: [], matchedKeywords: [] };
   }
   
   const keywords = await getKeywordFilters();
-  const lines = message.text.split('\n');
+  // 同时检查text和caption属性
+  const textToCheck = (message.text || '') + '\n' + (message.caption || '');
+  const lines = textToCheck.split('\n');
   const violatingLines = [];
   const matchedKeywords = [];
   

@@ -166,10 +166,12 @@ async function getKeywordFilters() {
  * @returns {Object} 包含isBlocked(是否包含违规内容)、violatingLines(违规行数组)和matchedKeywords(匹配的关键字数组)
  */
 async function containsBlockedKeyword(message) {
-  if (!message || !message.text) return { isBlocked: false, violatingLines: [], matchedKeywords: [] };
+  if (!message || (!message.text && !message.caption)) return { isBlocked: false, violatingLines: [], matchedKeywords: [] };
   
   const keywords = await getKeywordFilters();
-  const lines = message.text.split('\n');
+  // 同时检查text和caption属性
+  const textToCheck = (message.text || '') + '\n' + (message.caption || '');
+  const lines = textToCheck.split('\n');
   const violatingLines = [];
   const matchedKeywords = new Set();
   
