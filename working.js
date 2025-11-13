@@ -231,15 +231,23 @@ async function removeFromWhitelist(userId) {
  */
 async function getBlockedUsersIndex() {
   try {
+    console.log(`开始获取屏蔽用户索引，键名: ${BLOCKED_USERS_INDEX_KEY}`);
     const index = await nfd.get(BLOCKED_USERS_INDEX_KEY, { type: 'json' });
+    console.log(`获取到的索引原始值:`, index);
+    
     // 如果索引不存在或不是数组，初始化一个空数组
     if (!index || !Array.isArray(index)) {
+      console.log('索引不存在或不是数组，初始化空数组');
       await nfd.put(BLOCKED_USERS_INDEX_KEY, JSON.stringify([]));
+      console.log('空数组初始化完成');
       return [];
     }
+    
+    console.log(`获取到有效的屏蔽用户索引，数量: ${index.length}`);
     return index;
   } catch (error) {
-    console.error('获取屏蔽用户索引失败:', error);
+    console.error('获取屏蔽用户索引失败:', error.message || error);
+    console.error('错误堆栈:', error.stack);
     return [];
   }
 }
@@ -382,6 +390,8 @@ async function onUpdate (update) {
  * https://core.telegram.org/bots/api#message
  */
 async function onMessage (message) {
+  console.log(`[DEBUG] onMessage called, message text: ${message.text}, chat.id: ${message.chat.id}, ADMIN_UID: ${ADMIN_UID}`);
+  
   if(message.text === '/start'){
     // 由于startMsgUrl被注释，这里返回一个简单的欢迎消息
     return sendMessage({
@@ -390,6 +400,7 @@ async function onMessage (message) {
     })
   }
   // 在onMessage函数中添加/listblocked命令处理
+  console.log(`[DEBUG] Checking admin access: ${message.chat.id.toString()} === ${ADMIN_UID} ? ${message.chat.id.toString() === ADMIN_UID}`);
   if(message.chat.id.toString() === ADMIN_UID){
         if(!message?.reply_to_message?.chat){
           // 检查是否是关键词管理命令
@@ -404,7 +415,8 @@ async function onMessage (message) {
             const keyword = message.text.substring(15).trim();
             return handleRemoveKeyword(message, keyword);
           }
-          if(message.text === '/listblocked') {
+          if(message.text.startsWith('/listblocked')) {
+            console.log(`[DEBUG] Processing /listblocked command`);
             return listBlockedUsers(message);
           }
           // 白名单管理命令
@@ -1023,6 +1035,8 @@ async function isFraud(id){
  */
 async function listBlockedUsers(message) {
   try {
+    console.log('listBlockedUsers function called with message:', JSON.stringify(message));
+    
     // 获取页码参数，默认为第1页
     let page = 1;
     const messageText = message.text || '';
@@ -1031,18 +1045,34 @@ async function listBlockedUsers(message) {
       page = parseInt(pageMatch[1], 10);
       if (page < 1) page = 1;
     }
+    console.log(`请求的页码: ${page}`);
+    
+    // 提前声明内联键盘变量，避免后面引用未定义变量
+    let inlineKeyboard = [];
     
     // 获取所有被屏蔽用户的索引
+    console.log('开始获取被屏蔽用户索引...');
     let blockedUsersIndex = await getBlockedUsersIndex();
+    console.log(`获取到的屏蔽用户索引数量: ${blockedUsersIndex.length}`);
     
     // 过滤出仍然被屏蔽的用户
+    console.log('开始过滤仍然被屏蔽的用户...');
     const activeBlockedUsers = [];
     for (const indexItem of blockedUsersIndex) {
-      const isBlocked = await nfd.get('isblocked-' + indexItem.userId, { type: "json" });
-      if (isBlocked === true) {
-        activeBlockedUsers.push(indexItem);
+      const blockKey = 'isblocked-' + indexItem.userId;
+      console.log(`检查用户${indexItem.userId}是否被屏蔽，键名: ${blockKey}`);
+      try {
+        const isBlocked = await nfd.get(blockKey, { type: "json" });
+        console.log(`用户${indexItem.userId}屏蔽状态:`, isBlocked);
+        if (isBlocked === true) {
+          activeBlockedUsers.push(indexItem);
+          console.log(`用户${indexItem.userId}已添加到活跃屏蔽列表`);
+        }
+      } catch (error) {
+        console.error(`获取用户${indexItem.userId}屏蔽状态失败:`, error.message || error);
       }
     }
+    console.log(`过滤后活跃屏蔽用户数量: ${activeBlockedUsers.length}`);
     
     // 按屏蔽时间倒序排序（最新的排在前面）
     activeBlockedUsers.sort((a, b) => b.blockedAt - a.blockedAt);
@@ -1054,21 +1084,32 @@ async function listBlockedUsers(message) {
     const endIndex = Math.min(startIndex + PAGE_SIZE, totalCount);
     const paginatedUsers = activeBlockedUsers.slice(startIndex, endIndex);
     
+    console.log(`分页信息: 总数=${totalCount}, 总页数=${totalPages}, 当前页=${page}`);
+    console.log(`当前页用户数量: ${paginatedUsers.length}`);
+    
     // 获取当前页用户的详细信息
+    console.log('开始获取当前页用户详细信息...');
     const blockedUsersWithDetails = [];
     for (const userIndex of paginatedUsers) {
       let userInfo = null;
+      const userInfoKey = BLOCKED_USER_INFO_PREFIX + userIndex.userId;
+      console.log(`获取用户${userIndex.userId}详细信息，键名: ${userInfoKey}`);
       try {
-        userInfo = await nfd.get(BLOCKED_USER_INFO_PREFIX + userIndex.userId, { type: "json" });
+        userInfo = await nfd.get(userInfoKey, { type: "json" });
+        console.log(`用户${userIndex.userId}详细信息:`, userInfo);
       } catch (error) {
-        console.error(`获取用户${userIndex.userId}详细信息失败:`, error);
+        console.error(`获取用户${userIndex.userId}详细信息失败:`, error.message || error);
+        console.error('错误堆栈:', error.stack);
       }
       
-      blockedUsersWithDetails.push({
+      const combinedUserInfo = {
         ...userIndex,
         ...(userInfo || { userName: '未知用户', matchedKeywords: [] })
-      });
+      };
+      blockedUsersWithDetails.push(combinedUserInfo);
+      console.log(`用户${userIndex.userId}信息已添加到结果列表`);
     }
+    console.log(`用户详细信息获取完成，共${blockedUsersWithDetails.length}条记录`);
     
     // 构建回复消息
     let responseText = '';
@@ -1090,69 +1131,103 @@ async function listBlockedUsers(message) {
       });
       
       // 添加分页导航信息
-      if (totalPages > 1) {
-        // 构建内联键盘按钮
-        const inlineKeyboard = [];
-        const row = [];
-        
-        if (page > 1) {
-          row.push({
-            text: '上一页',
-            callback_data: `/listblocked ${page - 1}`
-          });
-        }
-        
-        if (page < totalPages) {
-          row.push({
-            text: '下一页',
-            callback_data: `/listblocked ${page + 1}`
-          });
-        }
-        
-        if (row.length > 0) {
-          inlineKeyboard.push(row);
-        }
-        
-        // 更新现有消息内容（适用于翻页场景）
-      if (message && message.message_id) {
-        return requestTelegram('editMessageText', makeReqBody({
-          chat_id: ADMIN_UID,
-          message_id: message.message_id,
-          text: responseText,
-          reply_markup: {
-            inline_keyboard: inlineKeyboard
+        if (totalPages > 1) {
+          // 构建内联键盘按钮
+          inlineKeyboard = [];
+          const row = [];
+          
+          if (page > 1) {
+            row.push({
+              text: '上一页',
+              callback_data: `/listblocked ${page - 1}`
+            });
           }
-        }));
-      } else {
-        // 首次发送消息（新建消息）
-        return sendMessage({
-          chat_id: ADMIN_UID,
+          
+          if (page < totalPages) {
+            row.push({
+              text: '下一页',
+              callback_data: `/listblocked ${page + 1}`
+            });
+          }
+          
+          if (row.length > 0) {
+            inlineKeyboard.push(row);
+          }
+        }
+    }
+    
+    // 更新或发送消息
+    console.log('准备发送或更新消息...');
+    const targetChatId = message.chat.id;
+    
+    // 检查是否是分页导航回调（通过callback_query或特定格式判断）
+    // 对于分页导航，我们应该优先编辑现有消息
+    const isPaginationCallback = message.callback_query || 
+                                (messageText.startsWith('/listblocked') && messageText.match(/\s+\d+$/));
+    console.log(`是否为分页导航回调: ${isPaginationCallback}`);
+    
+    // 如果是分页导航且有消息ID，优先编辑消息
+    if (isPaginationCallback && message && message.message_id) {
+      console.log('分页导航请求，优先尝试编辑消息');
+      try {
+        if (totalPages > 1) {
+          const editResult = await requestTelegram('editMessageText', makeReqBody({
+            chat_id: targetChatId,
+            message_id: message.message_id,
+            text: responseText,
+            reply_markup: {
+              inline_keyboard: inlineKeyboard
+            }
+          }));
+          console.log(`更新消息结果:`, editResult);
+          return editResult;
+        } else {
+          const editResult = await requestTelegram('editMessageText', makeReqBody({
+            chat_id: targetChatId,
+            message_id: message.message_id,
+            text: responseText
+          }));
+          console.log(`更新消息结果:`, editResult);
+          return editResult;
+        }
+      } catch (editError) {
+        console.error('编辑消息失败，转为发送新消息:', editError);
+        // 编辑失败后，回退到发送新消息
+      }
+    }
+    
+    // 初始请求或编辑失败时，发送新消息
+    try {
+      console.log('初始请求或编辑失败，发送新消息');
+      // 如果有多页，包含内联键盘
+      if (totalPages > 1) {
+        console.log(`发送新消息到: ${targetChatId}`);
+        const sendResult = await sendMessage({
+          chat_id: targetChatId,
           text: responseText,
           reply_markup: {
             inline_keyboard: inlineKeyboard
           }
         });
+        console.log(`发送消息结果:`, sendResult);
+        return sendResult;
+      } else {
+        console.log(`发送新消息到: ${targetChatId}`);
+        const sendResult = await sendMessage({
+          chat_id: targetChatId,
+          text: responseText
+        });
+        console.log(`发送消息结果:`, sendResult);
+        return sendResult;
       }
-      }
-    }
-    
-    // 更新或发送消息
-    if (message && message.message_id) {
-      return requestTelegram('editMessageText', makeReqBody({
-        chat_id: ADMIN_UID,
-        message_id: message.message_id,
-        text: responseText
-      }));
-    } else {
-      return sendMessage({
-        chat_id: ADMIN_UID,
-        text: responseText
-      });
+    } catch (error) {
+      console.error('发送消息失败:', error);
+      throw error;
     }
   } catch (error) {
     console.error('获取被屏蔽用户列表失败:', error);
     return sendMessage({
-      chat_id: ADMIN_UID,
+      chat_id: message.chat.id,
       text: '获取被屏蔽用户列表时发生错误'
     });
   }
