@@ -136,6 +136,15 @@ function forwardMessage(msg){
 }
 
 /**
+ * 编辑消息文本
+ * @param {Object} options 编辑消息选项
+ * @returns {Promise<Object>} Telegram API响应
+ */
+function editMessageText(options) {
+  return requestTelegram('editMessageText', makeReqBody(options))
+}
+
+/**
  * 获取关键字过滤列表
  */
 async function getKeywordFilters() {
@@ -437,23 +446,37 @@ async function onUpdate (update) {
     const callbackQuery = update.callback_query;
     const data = callbackQuery.data;
     
-    // 如果是分页导航的回调
+    // 创建通用的模拟消息对象，包含原始消息ID以便更新
+    const mockMessage = {
+      chat: { id: callbackQuery.message.chat.id },
+      text: data,
+      message_id: callbackQuery.message.message_id // 添加原始消息ID
+    };
+    
+    // 处理屏蔽名单分页导航的回调
     if (data.startsWith('/listblocked ')) {
-      // 创建模拟消息对象，包含原始消息ID以便更新
-      const mockMessage = {
-        chat: { id: callbackQuery.message.chat.id },
-        text: data,
-        message_id: callbackQuery.message.message_id // 添加原始消息ID
-      };
-      
       // 调用listBlockedUsers函数
       await listBlockedUsers(mockMessage);
-      
-      // 回复callback_query以避免用户看到加载指示器
-      await requestTelegram('answerCallbackQuery', makeReqBody({
-        callback_query_id: callbackQuery.id
-      }));
     }
+    // 处理白名单分页导航的回调
+    else if (data.startsWith('whitelist_page:')) {
+      // 提取页码
+      const page = data.split(':')[1];
+      // 调用listWhitelist函数
+      await listWhitelist(mockMessage, page, callbackQuery.message.message_id);
+    }
+    // 处理屏蔽关键字分页导航的回调
+    else if (data.startsWith('keywords_page:')) {
+      // 提取页码
+      const page = data.split(':')[1];
+      // 调用listKeywords函数
+      await listKeywords(mockMessage, page, callbackQuery.message.message_id);
+    }
+    
+    // 回复callback_query以避免用户看到加载指示器
+    await requestTelegram('answerCallbackQuery', makeReqBody({
+      callback_query_id: callbackQuery.id
+    }));
   }
 }
 
@@ -862,11 +885,151 @@ async function checkBlock(message){
  * 显示所有屏蔽关键字
  */
 async function showKeywords(message) {
-  const keywords = await getKeywordFilters();
-  return sendMessage({
-    chat_id: ADMIN_UID,
-    text: `当前屏蔽的关键字列表:\n${keywords.length > 0 ? keywords.join('\n') : '暂无屏蔽关键字'}`
-  });
+  // 直接调用listKeywords函数，默认显示第一页
+  return listKeywords(message, 1, null);
+}
+
+/**
+ * 列出所有屏蔽关键字（支持分页）
+ */
+async function listKeywords(message, page = 1, messageId = null) {
+  try {
+    // 获取屏蔽关键字数据
+    const keywords = await getKeywordFilters();
+    
+    // 每页显示的关键字数量
+    const itemsPerPage = 20;
+    
+    // 计算总页数
+    const totalPages = Math.max(1, Math.ceil(keywords.length / itemsPerPage));
+    
+    // 确保页码在有效范围内
+    page = Math.min(Math.max(1, parseInt(page) || 1), totalPages);
+    
+    // 计算当前页的数据范围
+    const startIndex = (page - 1) * itemsPerPage;
+    const endIndex = Math.min(startIndex + itemsPerPage, keywords.length);
+    
+    // 获取当前页的数据
+    const currentPageKeywords = keywords.slice(startIndex, endIndex);
+    
+    // 构建消息文本
+    let text = '当前屏蔽的关键字列表\n\n';
+    
+    if (keywords.length === 0) {
+      text = '暂无屏蔽关键字';
+    } else {
+      // 构建分页数据显示（2列布局）
+      let twoColumnLayout = [];
+      for (let i = 0; i < currentPageKeywords.length; i += 2) {
+        const index1 = startIndex + i + 1;
+        const keyword1 = currentPageKeywords[i];
+        let line = `${index1}. ${keyword1}`;
+        
+        // 如果有第二列数据，则添加到同一行
+        if (i + 1 < currentPageKeywords.length) {
+          const index2 = startIndex + i + 2;
+          const keyword2 = currentPageKeywords[i + 1];
+          // 计算第一列的填充空格，使两列对齐
+          const paddingSpaces = ' '.repeat(Math.max(0, 20 - keyword1.length));
+          line += paddingSpaces + `  ${index2}. ${keyword2}`;
+        }
+        twoColumnLayout.push(line);
+      }
+      
+      // 将两列布局转换为文本
+      text += twoColumnLayout.join('\n');
+      
+      // 添加分页信息
+      text += `\n\n第 ${page}/${totalPages} 页 (共 ${keywords.length} 个关键字)`;
+    }
+    
+    // 构建内联键盘
+    let inlineKeyboard = [];
+    
+    // 只有当总页数大于1时才显示分页按钮
+    if (totalPages > 1) {
+      const buttons = [];
+      
+      // 添加上一页按钮
+      if (page > 1) {
+        buttons.push({
+          text: '上一页',
+          callback_data: `keywords_page:${page - 1}`
+        });
+      }
+      
+      // 添加下一页按钮
+      if (page < totalPages) {
+        buttons.push({
+          text: '下一页',
+          callback_data: `keywords_page:${page + 1}`
+        });
+      }
+      
+      inlineKeyboard.push(buttons);
+    }
+    
+    // 检查是否是分页导航回调
+    const isPaginationCallback = message.callback_query || 
+                              (message.text && message.text.startsWith('keywords_page:'));
+    
+    // 目标聊天ID
+    const targetChatId = message.chat ? message.chat.id : message.callback_query.from.id;
+    
+    // 如果是分页导航且有消息ID，则优先编辑原消息
+    if (isPaginationCallback && messageId) {
+      try {
+        const editOptions = {
+          chat_id: targetChatId,
+          message_id: messageId,
+          text: text
+        };
+        
+        // 如果有内联键盘，则添加到编辑选项中
+        if (inlineKeyboard.length > 0) {
+          editOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
+        }
+        
+        // 执行编辑消息
+        const editResult = await editMessageText(editOptions);
+        console.log(`关键字消息编辑结果: ${editResult.ok}`);
+        
+        return editResult;
+      } catch (editError) {
+        console.error(`编辑关键字消息失败: ${editError.message}`);
+        // 编辑失败时，继续执行发送新消息的逻辑
+      }
+    }
+    
+    // 发送新消息（初始请求或编辑失败时）
+    try {
+      const sendOptions = {
+        chat_id: targetChatId,
+        text: text
+      };
+      
+      // 如果有内联键盘，则添加到发送选项中
+      if (inlineKeyboard.length > 0) {
+        sendOptions.reply_markup = JSON.stringify({ inline_keyboard: inlineKeyboard });
+      }
+      
+      // 执行发送消息
+      const sendResult = await sendMessage(sendOptions);
+      console.log(`关键字消息发送结果: ${sendResult.ok}`);
+      
+      return sendResult;
+    } catch (sendError) {
+      console.error(`发送关键字消息失败: ${sendError.message}`);
+      throw sendError;
+    }
+  } catch (error) {
+    console.error('显示关键字失败:', error);
+    return sendMessage({
+      chat_id: message.chat ? message.chat.id : message.callback_query.from.id,
+      text: '显示关键字失败，请稍后再试'
+    });
+  }
 }
 
 /**
