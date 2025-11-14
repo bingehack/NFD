@@ -140,6 +140,7 @@ Thumbs.db
 # Local test files
 *.test.js
 *.spec.js
+test*.js
 
 # Telegram Bot specific
 *.session
