@@ -27,6 +27,11 @@ const BLOCKED_USERS_INDEX_KEY = 'blocked-users-index';
 // 分页大小
 const PAGE_SIZE = 10;
 
+// 用户验证相关常量
+const VERIFIED_USER_KEY = 'verified_user_'; // 已验证用户的键名前缀
+const VERIFICATION_QUESTION_KEY = 'verification_question_'; // 用户验证题目的键名前缀
+const VERIFICATION_TIMEOUT = 3600 * 1000; // 验证超时时间（1小时）
+
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -35,6 +40,78 @@ function apiUrl (methodName, params = null) {
   if (params) {
     query = '?' + new URLSearchParams(params).toString()
   }
+
+/**
+ * 生成简单的数学验证题目
+ * @returns {Object} 包含题目和答案的对象
+ */
+function generateVerificationQuestion() {
+  // 生成两个1到10之间的随机数
+  const num1 = Math.floor(Math.random() * 10) + 1;
+  const num2 = Math.floor(Math.random() * 10) + 1;
+  // 随机选择加法或减法
+  const operation = Math.random() > 0.5 ? '+' : '-';
+  // 计算答案
+  let answer;
+  if (operation === '+') {
+    answer = num1 + num2;
+  } else {
+    // 确保减法结果为正数
+    if (num1 >= num2) {
+      answer = num1 - num2;
+    } else {
+      // 直接计算，不交换变量
+      answer = num2 - num1;
+    }
+  }
+  
+  return {
+    question: `请计算: ${num1} ${operation} ${num2} = ?`,
+    answer: answer.toString()
+  };
+}
+
+/**
+ * 检查用户是否已验证
+ * @param {number} userId 用户ID
+ * @returns {Promise<boolean>} 是否已验证
+ */
+async function isUserVerified(userId) {
+  try {
+    const verified = await nfd.get(VERIFIED_USER_KEY + userId, { type: 'json' });
+    if (verified && verified.expiryTime) {
+      // 检查是否过期
+      if (Date.now() > verified.expiryTime) {
+        // 过期了，删除验证状态
+        await nfd.delete(VERIFIED_USER_KEY + userId);
+        return false;
+      }
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error('检查用户验证状态时出错:', error);
+    return false;
+  }
+}
+
+/**
+ * 设置用户为已验证状态
+ * @param {number} userId 用户ID
+ */
+async function setUserVerified(userId) {
+  try {
+    // 设置验证状态，包含过期时间
+    const expiryTime = Date.now() + VERIFICATION_TIMEOUT;
+    await nfd.put(VERIFIED_USER_KEY + userId, JSON.stringify({
+      verified: true,
+      expiryTime: expiryTime,
+      verifiedAt: Date.now()
+    }));
+  } catch (error) {
+    console.error('设置用户验证状态时出错:', error);
+  }
+}
 
 /**
  * 保存管理员通知消息信息，用于后续删除
@@ -607,8 +684,65 @@ async function handleGuestMessage(message){
     })
   }  
   
-  // 检查用户是否在白名单中
+  // 检查用户是否在白名单中（白名单用户无需验证）
   const isWhitelisted = await isInWhitelist(chatId);
+  
+  // 如果不是白名单用户，检查验证状态
+  if (!isWhitelisted) {
+    const isVerified = await isUserVerified(chatId);
+    
+    if (!isVerified) {
+      // 首次使用或未验证，处理验证流程
+      if (message.text && message.text.startsWith('/verify ')) {
+        // 用户提交了答案
+        const userAnswer = message.text.substring(7).trim();
+        
+        // 获取存储的验证题目和答案
+        try {
+          const savedQuestion = await nfd.get(VERIFICATION_QUESTION_KEY + chatId, { type: 'json' });
+          
+          if (savedQuestion && userAnswer === savedQuestion.answer) {
+            // 验证成功
+            await setUserVerified(chatId);
+            await nfd.delete(VERIFICATION_QUESTION_KEY + chatId); // 删除验证题目
+            
+            return sendMessage({
+              chat_id: chatId,
+              text: '验证成功！您现在可以正常使用机器人了。'
+            });
+          } else {
+            // 验证失败，生成新的题目
+            const newQuestion = generateVerificationQuestion();
+            await nfd.put(VERIFICATION_QUESTION_KEY + chatId, JSON.stringify(newQuestion));
+            
+            return sendMessage({
+              chat_id: chatId,
+              text: '答案错误，请重试。\n\n' + newQuestion.question + '\n请回复: /verify 答案'
+            });
+          }
+        } catch (error) {
+          console.error('处理用户验证时出错:', error);
+          // 生成新的题目
+          const newQuestion = generateVerificationQuestion();
+          await nfd.put(VERIFICATION_QUESTION_KEY + chatId, JSON.stringify(newQuestion));
+          
+          return sendMessage({
+            chat_id: chatId,
+            text: '发生错误，请重试。\n\n' + newQuestion.question + '\n请回复: /verify 答案'
+          });
+        }
+      } else {
+        // 发送验证题目
+        const question = generateVerificationQuestion();
+        await nfd.put(VERIFICATION_QUESTION_KEY + chatId, JSON.stringify(question));
+        
+        return sendMessage({
+          chat_id: chatId,
+          text: '欢迎使用机器人！请先完成简单验证以证明您不是机器人。\n\n' + question.question + '\n\n请回复: /verify 答案\n例如: /verify 5'
+        });
+      }
+    }
+  }
   
   // 检查消息是否包含屏蔽关键字（白名单用户不受限制）
   const keywordCheck = !isWhitelisted && await containsBlockedKeyword(message);

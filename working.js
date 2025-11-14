@@ -28,6 +28,11 @@ const BLOCKED_USERS_INDEX_KEY = 'blocked-users-index';
 // 分页大小
 const PAGE_SIZE = 10;
 
+// 用户验证相关常量
+const VERIFIED_USER_KEY = 'verified_user_'; // 已验证用户的键名前缀
+const VERIFICATION_QUESTION_KEY = 'verification_question_'; // 用户验证题目的键名前缀
+const VERIFICATION_TIMEOUT = 3600 * 1000; // 验证超时时间（1小时）
+
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -631,7 +636,7 @@ async function onMessage (message) {
 
 async function handleGuestMessage(message){  
   let chatId = message.chat.id;
-  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })  
   
   if(isblocked){    
     return sendMessage({      
@@ -640,8 +645,220 @@ async function handleGuestMessage(message){
     })
   }  
   
-  // 检查用户是否在白名单中
+  // 检查用户是否在白名单中（白名单用户无需验证）
   const isWhitelisted = await isInWhitelist(chatId);
+  
+  // 冷却时间相关常量
+  const VERIFICATION_COOLDOWN_KEY = 'verification_cooldown_';
+  const VERIFICATION_COOLDOWN_TIME = 60 * 1000; // 1分钟冷却时间
+  
+  // 检查是否处于冷却时间
+  async function isInCooldown(userId) {
+    try {
+      const cooldownData = await nfd.get(VERIFICATION_COOLDOWN_KEY + userId, { type: 'json' });
+      if (cooldownData && cooldownData.expiryTime) {
+        if (Date.now() < cooldownData.expiryTime) {
+          return true;
+        }
+        // 冷却时间已过，清除冷却状态
+        await nfd.delete(VERIFICATION_COOLDOWN_KEY + userId);
+      }
+      return false;
+    } catch (error) {
+      console.error('检查冷却时间时出错:', error);
+      return false;
+    }
+  }
+  
+  // 设置冷却时间
+  async function setCooldown(userId) {
+    try {
+      const expiryTime = Date.now() + VERIFICATION_COOLDOWN_TIME;
+      await nfd.put(VERIFICATION_COOLDOWN_KEY + userId, JSON.stringify({
+        expiryTime: expiryTime,
+        setAt: Date.now()
+      }));
+    } catch (error) {
+      console.error('设置冷却时间时出错:', error);
+    }
+  }
+  
+  // 获取剩余冷却时间（秒）
+  async function getRemainingCooldown(userId) {
+    try {
+      const cooldownData = await nfd.get(VERIFICATION_COOLDOWN_KEY + userId, { type: 'json' });
+      if (cooldownData && cooldownData.expiryTime) {
+        const remaining = Math.ceil((cooldownData.expiryTime - Date.now()) / 1000);
+        return remaining > 0 ? remaining : 0;
+      }
+      return 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+  
+  // 处理验证按钮回调
+  async function handleVerificationCallback(callbackQuery) {
+    const userId = callbackQuery.from.id;
+    const data = callbackQuery.data;
+    
+    // 检查是否为验证相关的回调
+    if (!data.startsWith('verify:')) {
+      return;
+    }
+    
+    // 检查是否处于冷却时间
+    const inCooldown = await isInCooldown(userId);
+    if (inCooldown) {
+      const remaining = await getRemainingCooldown(userId);
+      await requestTelegram('answerCallbackQuery', makeReqBody({
+        callback_query_id: callbackQuery.id,
+        text: `请在 ${remaining} 秒后重试`,
+        show_alert: true
+      }));
+      return;
+    }
+    
+    // 获取用户选择的答案
+    const selectedAnswer = data.substring(7);
+    
+    try {
+      // 获取存储的验证题目
+      const savedQuestion = await nfd.get(VERIFICATION_QUESTION_KEY + userId, { type: 'json' });
+      
+      if (savedQuestion && selectedAnswer === savedQuestion.correctAnswer) {
+        // 验证成功
+        await setUserVerified(userId);
+        await nfd.delete(VERIFICATION_QUESTION_KEY + userId); // 删除验证题目
+        
+        // 删除冷却状态（如果有）
+        await nfd.delete(VERIFICATION_COOLDOWN_KEY + userId);
+        
+        // 回复callback_query
+        await requestTelegram('answerCallbackQuery', makeReqBody({
+          callback_query_id: callbackQuery.id,
+          text: '验证成功！'
+        }));
+        
+        // 编辑原始消息
+        await editMessageText({
+          chat_id: callbackQuery.message.chat.id,
+          message_id: callbackQuery.message.message_id,
+          text: '验证成功！您现在可以正常使用机器人了。'
+        });
+      } else {
+        // 验证失败，设置冷却时间
+        await setCooldown(userId);
+        
+        // 回复callback_query
+        await requestTelegram('answerCallbackQuery', makeReqBody({
+          callback_query_id: callbackQuery.id,
+          text: '答案错误，请在1分钟后重试',
+          show_alert: true
+        }));
+        
+        // 编辑原始消息显示冷却状态
+        await editMessageText({
+          chat_id: callbackQuery.message.chat.id,
+          message_id: callbackQuery.message.message_id,
+          text: '答案错误！请在1分钟后重试。\n\n点击下方按钮重新获取验证题目。',
+          reply_markup: JSON.stringify({
+            inline_keyboard: [[
+              { text: '重新获取验证', callback_data: 'new_verification' }
+            ]]
+          })
+        });
+      }
+    } catch (error) {
+      console.error('处理验证回调时出错:', error);
+      
+      // 回复错误
+      await requestTelegram('answerCallbackQuery', makeReqBody({
+        callback_query_id: callbackQuery.id,
+        text: '处理验证时出错，请稍后重试',
+        show_alert: true
+      }));
+    }
+  }
+  
+  // 生成带按钮的验证消息
+  async function sendVerificationWithButtons(chatId) {
+    try {
+      // 生成验证题目
+      const question = generateVerificationQuestion();
+      await nfd.put(VERIFICATION_QUESTION_KEY + chatId, JSON.stringify(question));
+      
+      // 创建内联键盘
+      const keyboardButtons = question.options.map(option => [{
+        text: option,
+        callback_data: `verify:${option}`
+      }]);
+      
+      return sendMessage({
+        chat_id: chatId,
+        text: '欢迎使用机器人！请先完成简单验证以证明您不是机器人。\n\n' + question.question + '\n\n请选择正确答案：',
+        reply_markup: JSON.stringify({
+          inline_keyboard: keyboardButtons
+        })
+      });
+    } catch (error) {
+      console.error('发送验证按钮消息时出错:', error);
+      return sendMessage({
+        chat_id: chatId,
+        text: '生成验证题目时出错，请稍后重试。'
+      });
+    }
+  }
+  
+  // 检查是否是验证相关的回调
+  if (update.callback_query && update.callback_query.data.startsWith('verify:')) {
+    return handleVerificationCallback(update.callback_query);
+  }
+  
+  // 检查是否请求新验证
+  if (update.callback_query && update.callback_query.data === 'new_verification') {
+    const userId = update.callback_query.from.id;
+    
+    // 检查冷却时间
+    const inCooldown = await isInCooldown(userId);
+    if (inCooldown) {
+      const remaining = await getRemainingCooldown(userId);
+      await requestTelegram('answerCallbackQuery', makeReqBody({
+        callback_query_id: update.callback_query.id,
+        text: `请在 ${remaining} 秒后重试`,
+        show_alert: true
+      }));
+      return;
+    }
+    
+    // 回复callback_query
+    await requestTelegram('answerCallbackQuery', makeReqBody({
+      callback_query_id: update.callback_query.id
+    }));
+    
+    // 发送新的验证题目
+    return sendVerificationWithButtons(userId);
+  }
+  
+  // 主验证流程
+  if (!isWhitelisted) {
+    const isVerified = await isUserVerified(chatId);
+    
+    if (!isVerified) {
+      // 检查是否处于冷却时间
+      const inCooldown = await isInCooldown(chatId);
+      if (inCooldown) {
+        const remaining = await getRemainingCooldown(chatId);
+        return sendMessage({
+          chat_id: chatId,
+          text: `您的验证失败次数过多，请在 ${remaining} 秒后重试。`
+        });
+      }
+      
+      // 发送带按钮的验证题目
+      return sendVerificationWithButtons(chatId);
+    }
+  }
   
   // 检查消息是否包含屏蔽关键字（白名单用户不受限制）
   const keywordCheck = !isWhitelisted && await containsBlockedKeyword(message);
@@ -795,6 +1012,96 @@ async function handleGuestMessage(message){
     await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
   return handleNotify(message)
+}
+
+/**
+ * 生成带有选项的数学验证题目
+ * @returns {Object} 包含题目、正确答案和选项数组的对象
+ */
+function generateVerificationQuestion() {
+  // 生成两个1到10之间的随机数
+  const num1 = Math.floor(Math.random() * 10) + 1;
+  const num2 = Math.floor(Math.random() * 10) + 1;
+  // 随机选择加法或减法
+  const operation = Math.random() > 0.5 ? '+' : '-';
+  // 计算正确答案
+  let correctAnswer;
+  if (operation === '+') {
+    correctAnswer = num1 + num2;
+  } else {
+    // 确保减法结果为正数
+    correctAnswer = Math.abs(num1 - num2);
+  }
+  
+  // 生成3个错误的答案
+  const wrongAnswers = new Set();
+  while (wrongAnswers.size < 3) {
+    // 生成与正确答案相近但不同的错误答案
+    let wrongAnswer;
+    do {
+      // 生成一个在正确答案±5范围内的随机数，但确保不为0（如果正确答案是0）
+      const offset = Math.floor(Math.random() * 10) - 4; // -4到5的偏移
+      wrongAnswer = correctAnswer + offset;
+    } while (wrongAnswer === correctAnswer || wrongAnswer < 0);
+    wrongAnswers.add(wrongAnswer.toString());
+  }
+  
+  // 组合所有选项
+  const options = [correctAnswer.toString(), ...wrongAnswers];
+  
+  // 随机打乱选项顺序
+  for (let i = options.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+  
+  return {
+    question: `请计算: ${num1} ${operation} ${num2} = ?`,
+    correctAnswer: correctAnswer.toString(),
+    options: options
+  };
+}
+
+/**
+ * 检查用户是否已验证
+ * @param {number} userId 用户ID
+ * @returns {Promise<boolean>} 是否已验证
+ */
+async function isUserVerified(userId) {
+  try {
+    const verified = await nfd.get(VERIFIED_USER_KEY + userId, { type: 'json' });
+    if (verified && verified.expiryTime) {
+      // 检查是否过期
+      if (Date.now() > verified.expiryTime) {
+        // 过期了，删除验证状态
+        await nfd.delete(VERIFIED_USER_KEY + userId);
+        return false;
+      }
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error('检查用户验证状态时出错:', error);
+    return false;
+  }
+}
+
+/**
+ * 设置用户为已验证状态
+ * @param {number} userId 用户ID
+ */
+async function setUserVerified(userId) {
+  try {
+    // 设置验证状态，包含过期时间
+    const expiryTime = Date.now() + VERIFICATION_TIMEOUT;
+    await nfd.put(VERIFIED_USER_KEY + userId, JSON.stringify({
+      verified: true,
+      expiryTime: expiryTime,
+      verifiedAt: Date.now()
+    }));
+  } catch (error) {
+    console.error('设置用户验证状态时出错:', error);
+  }
 }
 
 /**
