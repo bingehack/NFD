@@ -27,7 +27,7 @@ No Fraud / Node Forward Bot
     - 增加一个`ENV_ADMIN_UID`变量，数值为从步骤3中获得的用户id
 6. 绑定kv数据库，创建一个Namespace Name为`nfd`的kv数据库，在setting -> variable中设置`KV Namespace Bindings`：nfd -> nfd
 7. 点击`Quick Edit`，复制[这个文件](./worker.js)到编辑器中
-8. 通过打开`https://xxx.workers.dev/registerWebhook`来注册websoket
+8. 脚本已实现自动注册webhook功能，部署完成后会自动注册，无需手动操作
 
 ## 使用方法
 - 当其他用户给bot发消息，会被转发到bot创建者
@@ -40,6 +40,8 @@ No Fraud / Node Forward Bot
 - `/whitelist` - 查看白名单用户列表
 - `/addwhitelist 用户ID` - 添加用户到白名单（白名单用户不受自动屏蔽规则限制）
 - `/removewhitelist 用户ID` - 从白名单中移除用户
+
+> **注意：** 部署前请在worker.js文件中将@UnblockBankCard1_bot替换为您自己的客服机器人
 
 ## 自动屏蔽规则
 - 系统会自动屏蔽包含指定关键词的消息发送者
