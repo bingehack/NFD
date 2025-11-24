@@ -1,0 +1,324 @@
+const TOKEN = ENV_BOT_TOKEN // Get it from @BotFather
+const WEBHOOK = '/endpoint'
+const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
+const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
+
+// Webhook注册状态键名
+const WEBHOOK_REGISTERED_KEY = 'webhook_registered';
+// Webhook检查间隔（毫秒），设置为1小时检查一次
+const WEBHOOK_CHECK_INTERVAL = 3600 * 1000;
+
+const NOTIFY_INTERVAL = 3600 * 1000;
+
+/**
+ * 数据存储配置中心
+ * 作用：替代硬编码的nfd1调用，使系统更灵活、易于维护
+ * 使用方法：
+ * 1. 如需更换存储实例，只需修改instance属性
+ * 2. 如需调整键名前缀，修改对应的prefix属性
+ * 3. 如需更新URL，修改urls对象中的对应值
+ */
+const DATA_STORAGE = {
+  // 核心存储实例 - 可替换为任何实现get/put方法的存储方案
+  instance: nfd1, // 当前使用的nfd1存储实例
+  
+  // 键名前缀配置 - 统一管理所有存储键的前缀格式
+  prefix: 'msg-map-', // 消息映射键前缀（用户ID与消息ID的映射）
+  blockPrefix: 'isblocked-', // 黑名单状态键前缀
+  lastMsgPrefix: 'lastmsg-', // 最后消息时间戳键前缀
+  
+  // 外部资源URL配置 - 集中管理所有外部API和资源链接
+  urls: {
+    // 欺诈数据库URL - 用于验证用户是否为欺诈用户
+    fraudDb: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/fraud.db',
+    // 通知模板URL - 用于获取通知消息模板
+    notification: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/notification.txt',
+    // 启动消息URL（当前注释掉）- 用于获取欢迎消息模板
+    // startMessage: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/startMessage.md'
+  }
+};
+
+// 兼容旧代码的常量
+const fraudDb = DATA_STORAGE.urls.fraudDb;
+const notificationUrl = DATA_STORAGE.urls.notification;
+// const startMsgUrl = DATA_STORAGE.urls.startMessage;
+
+const enable_notification = false
+/**
+ * Return url to telegram api, optionally with parameters added
+ */
+function apiUrl (methodName, params = null) {
+  let query = ''
+  if (params) {
+    query = '?' + new URLSearchParams(params).toString()
+  }
+  return `https://api.telegram.org/bot${TOKEN}/${methodName}${query}`
+}
+
+function requestTelegram(methodName, body, params = null){
+  return fetch(apiUrl(methodName, params), body)
+    .then(r => r.json())
+}
+
+function makeReqBody(body){
+  return {
+    method:'POST',
+    headers:{
+      'content-type':'application/json'
+    },
+    body:JSON.stringify(body)
+  }
+}
+
+function sendMessage(msg = {}){
+  return requestTelegram('sendMessage', makeReqBody(msg))
+}
+
+function copyMessage(msg = {}){
+  return requestTelegram('copyMessage', makeReqBody(msg))
+}
+
+function forwardMessage(msg){
+  return requestTelegram('forwardMessage', makeReqBody(msg))
+}
+
+/**
+ * Wait for requests to the worker
+ */
+addEventListener('fetch', event => {
+  const url = new URL(event.request.url)
+  
+  // 自动注册Webhook（不阻塞主要请求处理）
+  if (url.pathname !== WEBHOOK) { // 避免在Webhook回调中触发，防止循环
+    event.waitUntil(autoRegisterWebhook(url));
+  }
+  
+  // 原有路由处理逻辑
+  if (url.pathname === WEBHOOK) {
+    event.respondWith(handleWebhook(event))
+  } else if (url.pathname === '/registerWebhook') {
+    event.respondWith(registerWebhook(event, url, WEBHOOK, SECRET))
+  } else if (url.pathname === '/unRegisterWebhook') {
+    event.respondWith(unRegisterWebhook(event))
+  } else {
+    // 首次访问任何非特定路径时，也返回简单的确认信息
+    event.respondWith(new Response('Bot is running. Webhook registration is automatic.'))
+  }
+})
+
+/**
+ * Handle requests to WEBHOOK
+ * https://core.telegram.org/bots/api#update
+ */
+async function handleWebhook (event) {
+  // Check secret
+  if (event.request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== SECRET) {
+    return new Response('Unauthorized', { status: 403 })
+  }
+
+  // Read request body synchronously
+  const update = await event.request.json()
+  // Deal with response asynchronously
+  event.waitUntil(onUpdate(update))
+
+  return new Response('Ok')
+}
+
+/**
+ * Handle incoming Update
+ * https://core.telegram.org/bots/api#update
+ */
+async function onUpdate (update) {
+  if ('message' in update) {
+    await onMessage(update.message)
+  }
+}
+
+/**
+ * Handle incoming Message
+ * https://core.telegram.org/bots/api#message
+ */
+async function onMessage (message) {
+  if(message.text === '/start'){
+    let startMsg = await fetch(startMsgUrl).then(r => r.text())
+    return sendMessage({
+      chat_id:message.chat.id,
+      text:startMsg,
+    })
+  }
+  if(message.chat.id.toString() === ADMIN_UID){
+    if(!message?.reply_to_message?.chat){
+      return sendMessage({
+        chat_id:ADMIN_UID,
+        text:'使用方法，回复转发的消息，并发送回复消息，或者`/block`、`/unblock`、`/checkblock`等指令'
+      })
+    }
+    if(/^\/block$/.exec(message.text)){
+      return handleBlock(message)
+    }
+    if(/^\/unblock$/.exec(message.text)){
+      return handleUnBlock(message)
+    }
+    if(/^\/checkblock$/.exec(message.text)){
+      return checkBlock(message)
+    }
+    let guestChantId = await DATA_STORAGE.instance.get(DATA_STORAGE.prefix + message?.reply_to_message.message_id,
+                                      { type: "json" })
+    return copyMessage({
+      chat_id: guestChantId,
+      from_chat_id:message.chat.id,
+      message_id:message.message_id,
+    })
+  }
+  return handleGuestMessage(message)
+}
+
+async function handleGuestMessage(message){
+  let chatId = message.chat.id;
+  let isblocked = await DATA_STORAGE.instance.get(DATA_STORAGE.blockPrefix + chatId, { type: "json" })
+  
+  if(isblocked){
+    return sendMessage({
+      chat_id: chatId,
+      text:'Your are blocked'
+    })
+  }
+
+  let forwardReq = await forwardMessage({
+    chat_id:ADMIN_UID,
+    from_chat_id:message.chat.id,
+    message_id:message.message_id
+  })
+  console.log(JSON.stringify(forwardReq))
+  if(forwardReq.ok){
+    await DATA_STORAGE.instance.put(DATA_STORAGE.prefix + forwardReq.result.message_id, chatId)
+  }
+  return handleNotify(message)
+}
+
+async function handleNotify(message){
+  // 先判断是否是诈骗人员，如果是，则直接提醒
+  // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
+  let chatId = message.chat.id;
+  if(await isFraud(chatId)){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text:`检测到骗子，UID${chatId}`
+    })
+  }
+  if(enable_notification){
+    let lastMsgTime = await DATA_STORAGE.instance.get(DATA_STORAGE.lastMsgPrefix + chatId, { type: "json" })
+    if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
+      await DATA_STORAGE.instance.put(DATA_STORAGE.lastMsgPrefix + chatId, Date.now())
+      return sendMessage({
+        chat_id: ADMIN_UID,
+        text:await fetch(notificationUrl).then(r => r.text())
+      })
+    }
+  }
+}
+
+async function handleBlock(message){
+  let guestChantId = await DATA_STORAGE.instance.get(DATA_STORAGE.prefix + message.reply_to_message.message_id,
+                                      { type: "json" })
+  if(guestChantId === ADMIN_UID){
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text:'不能屏蔽自己'
+    })
+  }
+  await DATA_STORAGE.instance.put(DATA_STORAGE.blockPrefix + guestChantId, true)
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `UID:${guestChantId}屏蔽成功`,
+  })
+}
+
+async function handleUnBlock(message){
+  let guestChantId = await DATA_STORAGE.instance.get(DATA_STORAGE.prefix + message.reply_to_message.message_id,
+  { type: "json" })
+
+  await DATA_STORAGE.instance.put(DATA_STORAGE.blockPrefix + guestChantId, false)
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text:`UID:${guestChantId}解除屏蔽成功`,
+  })
+}
+
+async function checkBlock(message){
+  let guestChantId = await DATA_STORAGE.instance.get(DATA_STORAGE.prefix + message.reply_to_message.message_id,
+  { type: "json" })
+  let blocked = await DATA_STORAGE.instance.get(DATA_STORAGE.blockPrefix + guestChantId, { type: "json" })
+
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `UID:${guestChantId}` + (blocked ? '被屏蔽' : '没有被屏蔽')
+  })
+}
+
+/**
+ * Send plain text message
+ * https://core.telegram.org/bots/api#sendmessage
+ */
+async function sendPlainText (chatId, text) {
+  return sendMessage({
+    chat_id: chatId,
+    text
+  })
+}
+
+/**
+ * Set webhook to this worker's url
+ * https://core.telegram.org/bots/api#setwebhook
+ */
+async function registerWebhook (event, requestUrl, suffix, secret) {
+  // https://core.telegram.org/bots/api#setwebhook
+  const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`
+  const r = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: secret }))).json()
+  return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
+}
+
+/**
+ * Remove webhook
+ * https://core.telegram.org/bots/api#setwebhook
+ */
+async function unRegisterWebhook (event) {
+  const r = await (await fetch(apiUrl('setWebhook', { url: '' }))).json()
+  return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
+}
+
+async function isFraud(id){
+  id = id.toString()
+  let db = await fetch(fraudDb).then(r => r.text())
+  let arr = db.split('\n').filter(v => v)
+  console.log(JSON.stringify(arr))
+  let flag = arr.filter(v => v === id).length !== 0
+  console.log(flag)
+  return flag
+}
+
+/**
+ * 自动注册Webhook的功能函数
+ */
+async function autoRegisterWebhook(requestUrl) {
+  try {
+    // 检查Webhook是否已经注册或注册时间是否超过检查间隔
+    const lastRegistered = await nfd.get(WEBHOOK_REGISTERED_KEY, { type: "json" });
+    const currentTime = Date.now();
+    
+    // 如果没有注册记录，或者距离上次注册已超过检查间隔，则重新注册
+    if (!lastRegistered || (currentTime - lastRegistered) > WEBHOOK_CHECK_INTERVAL) {
+
+      const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${WEBHOOK}`;
+      const response = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: SECRET }))).json();
+      
+      if (response.ok) {
+        // 记录注册成功的时间戳
+        await nfd.put(WEBHOOK_REGISTERED_KEY, currentTime);
+      }
+    }
+  } catch (error) {
+  }
+}
