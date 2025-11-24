@@ -54,5 +54,21 @@ No Fraud / Node Forward Bot
 - 可以通过pr扩展本数据，也可以通过提issue方式补充
 - 提供额外欺诈信息时，需要提供一定的消息出处
 
+## 架构改进
+- **配置中心实现**
+  - 新增DATA_STORAGE配置中心，集中管理所有常量定义和URL配置
+  - 统一管理所有键名常量，如keywordFiltersKey、whitelistKey、blockedUsersIndexKey等
+  - 集中管理外部API URL，如fraudDb和notificationUrl
+
+- **存储操作优化**
+  - 统一使用DATA_STORAGE.instance进行所有KV存储操作
+  - 支持get、put、delete等标准操作接口
+  - 增强错误处理机制，提供更完善的错误日志
+
+- **代码结构优化**
+  - 提高代码可维护性，常量定义集中管理
+  - 减少重复代码，存储操作统一接口
+  - 提升扩展性，新增存储键或URL配置更简便
+
 ## Thanks
 - [telegram-bot-cloudflare](https://github.com/cvzi/telegram-bot-cloudflare)

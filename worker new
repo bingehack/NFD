@@ -12,7 +12,7 @@ const NOTIFY_INTERVAL = 3600 * 1000;
 
 /**
  * 数据存储配置中心
- * 作用：替代硬编码的nfd1调用，使系统更灵活、易于维护
+ * 作用：替代硬编码的nfd调用，使系统更灵活、易于维护
  * 使用方法：
  * 1. 如需更换存储实例，只需修改instance属性
  * 2. 如需调整键名前缀，修改对应的prefix属性
@@ -20,7 +20,7 @@ const NOTIFY_INTERVAL = 3600 * 1000;
  */
 const DATA_STORAGE = {
   // 核心存储实例 - 可替换为任何实现get/put方法的存储方案
-  instance: nfd1, // 当前使用的nfd1存储实例
+  instance: nfd, // 当前使用的nfd存储实例
   
   // 键名前缀配置 - 统一管理所有存储键的前缀格式
   prefix: 'msg-map-', // 消息映射键前缀（用户ID与消息ID的映射）
@@ -30,11 +30,11 @@ const DATA_STORAGE = {
   // 外部资源URL配置 - 集中管理所有外部API和资源链接
   urls: {
     // 欺诈数据库URL - 用于验证用户是否为欺诈用户
-    fraudDb: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/fraud.db',
+    fraudDb: 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db',
     // 通知模板URL - 用于获取通知消息模板
-    notification: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/notification.txt',
+    notification: 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/notification.txt',
     // 启动消息URL（当前注释掉）- 用于获取欢迎消息模板
-    // startMessage: 'https://raw.githubusercontent.com/LloydAsp/nfd1/main/data/startMessage.md'
+    // startMessage: 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md'
   }
 };
 
